@@ -1,16 +1,17 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Text.Json;
 
-namespace Microsoft.DevProxy.Abstractions;
+namespace DevProxy.Abstractions;
 
 // from https://stackoverflow.com/questions/61553962/getting-nested-properties-with-system-text-json
 public static partial class JsonExtensions
 {
     public static JsonElement? Get(this JsonElement element, string name) => 
         element.ValueKind != JsonValueKind.Null && element.ValueKind != JsonValueKind.Undefined && element.TryGetProperty(name, out var value) 
-            ? value : (JsonElement?)null;
+            ? value : null;
     
     public static JsonElement? Get(this JsonElement element, int index)
     {

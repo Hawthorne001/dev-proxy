@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-#---------------------------------------------------------------------------------------------
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License. See License in the project root for license information.
-#---------------------------------------------------------------------------------------------
+# Licensed to the .NET Foundation under one or more agreements.
+# The .NET Foundation licenses this file to you under the MIT license.
+# See the LICENSE file in the project root for more information.
 
 if [ "$(expr substr $(uname -s) 1 5)" != "Linux" ]; then
     echo "Unsupported OS. This script is for installing Dev Proxy on Linux. To install Dev Proxy on macOS or Windows use their installers. For more information, visit https://aka.ms/devproxy/start."
@@ -12,12 +11,12 @@ fi
 echo ""
 echo "This script installs Dev Proxy on your machine. It runs the following steps:"
 echo ""
-echo "1. Create the 'devproxy' directory in the current working folder"
+echo "1. Create the 'devproxy-beta' directory in the current working folder"
 echo "2. Download the latest beta Dev Proxy release"
-echo "3. Unzip the release in the devproxy directory"
-echo "4. Configure devproxy and its files as executable"
+echo "3. Unzip the release in the devproxy-beta directory"
+echo "4. Configure Dev Proxy and its files as executable"
 echo "5. Configure new version notifications for the beta channel"
-echo "6. Add the devproxy directory to your PATH environment variable in your shell profile"
+echo "6. Add the devproxy-beta directory to your PATH environment variable in your shell profile"
 echo ""
 
 if [ -t 0 ]; then
@@ -37,8 +36,8 @@ if [ -t 0 ]; then
     echo -e "\n"
 fi
 
-mkdir devproxy
-cd devproxy
+mkdir devproxy-beta
+cd devproxy-beta
 full_path=$(pwd)
 
 set -e # Terminates program immediately if any command below exits with a non-zero exit status
@@ -46,7 +45,7 @@ set -e # Terminates program immediately if any command below exits with a non-ze
 if [ $# -eq 0 ]
 then
     echo "Getting latest beta Dev Proxy version..."
-    version=$(curl -s "https://api.github.com/repos/microsoft/dev-proxy/releases?per_page=1" | awk -F: '/"tag_name"/ {print $2}' | sed 's/[", ]//g')
+    version=$(curl -s "https://api.github.com/repos/dotnet/dev-proxy/releases?per_page=2" | awk -F: '/"tag_name"/ {print $2}' | sed 's/[", ]//g' | grep -m 1 -- "-beta")
     echo "Latest beta version is $version"
 else
     version=$1
@@ -54,7 +53,7 @@ fi
 
 echo "Downloading Dev Proxy $version..."
 
-base_url="https://github.com/microsoft/dev-proxy/releases/download/$version/dev-proxy"
+base_url="https://github.com/dotnet/dev-proxy/releases/download/$version/dev-proxy"
 
 ARCH="$(uname -m)"
 if [ "$(expr substr ${ARCH} 1 5)" == "arm64" ] || [ "$(expr substr ${ARCH} 1 7)" == "aarch64" ]; then
@@ -68,7 +67,7 @@ fi
 
 unzip -o ./devproxy.zip -d ./
 rm ./devproxy.zip
-echo "Configuring devproxy and its files as executable..."
+echo "Configuring Dev Proxy and its files as executable..."
 chmod +x ./devproxy-beta ./libe_sqlite3.so
 echo "Configuring new version notifications for the beta channel..."
 sed -i 's/"newVersionNotification": "stable"/"newVersionNotification": "beta"/g' ./devproxyrc.json
@@ -94,4 +93,4 @@ echo "To get started, run:"
 if [[ "$fileUsed" != "" ]]; then
     echo "    source $fileUsed"
 fi
-echo "    devproxy -h"
+echo "    devproxy-beta -h"

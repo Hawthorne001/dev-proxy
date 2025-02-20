@@ -1,15 +1,16 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Diagnostics;
-using System.IdentityModel.Tokens.Jwt;
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.DevProxy.Plugins.RequestLogs.ApiCenter;
+using DevProxy.Abstractions;
+using DevProxy.Plugins.ApiCenter;
+using DevProxy.Plugins.MinimalPermissions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.OpenApi.Models;
 
-namespace Microsoft.DevProxy.Plugins.RequestLogs;
+namespace DevProxy.Plugins.RequestLogs;
 
 public class ApiCenterMinimalPermissionsPluginReportApiResult
 {
@@ -23,17 +24,11 @@ public class ApiCenterMinimalPermissionsPluginReportApiResult
     public required bool UsesMinimalPermissions { get; init; }
 }
 
-public class ApiCenterMinimalPermissionsPluginReportError
-{
-    public required string Request { get; init; }
-    public required string Error { get; init; }
-}
-
 public class ApiCenterMinimalPermissionsPluginReport
 {
     public required ApiCenterMinimalPermissionsPluginReportApiResult[] Results { get; init; }
     public required string[] UnmatchedRequests { get; init; }
-    public required ApiCenterMinimalPermissionsPluginReportError[] Errors { get; init; }
+    public required ApiPermissionError[] Errors { get; init; }
 }
 
 internal class ApiCenterMinimalPermissionsPluginConfiguration
@@ -44,22 +39,18 @@ internal class ApiCenterMinimalPermissionsPluginConfiguration
     public string WorkspaceName { get; set; } = "default";
 }
 
-public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
+public class ApiCenterMinimalPermissionsPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseReportingPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
-    private ApiCenterProductionVersionPluginConfiguration _configuration = new();
+    private readonly ApiCenterProductionVersionPluginConfiguration _configuration = new();
     private ApiCenterClient? _apiCenterClient;
     private Api[]? _apis;
     private Dictionary<string, ApiDefinition>? _apiDefinitionsByUrl;
 
-    public ApiCenterMinimalPermissionsPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(ApiCenterMinimalPermissionsPlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         ConfigSection?.Bind(_configuration);
 
@@ -85,7 +76,7 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
         Logger.LogInformation("Plugin {plugin} connecting to Azure...", Name);
         try
         {
-            _ = _apiCenterClient.GetAccessToken(CancellationToken.None).Result;
+            _ = await _apiCenterClient.GetAccessTokenAsync(CancellationToken.None);
         }
         catch (Exception ex)
         {
@@ -94,15 +85,15 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
         }
         Logger.LogDebug("Plugin {plugin} auth confirmed...", Name);
 
-        PluginEvents.AfterRecordingStop += AfterRecordingStop;
+        PluginEvents.AfterRecordingStop += AfterRecordingStopAsync;
     }
 
-    private async Task AfterRecordingStop(object sender, RecordingArgs e)
+    private async Task AfterRecordingStopAsync(object sender, RecordingArgs e)
     {
         var interceptedRequests = e.RequestLogs
             .Where(l =>
                 l.MessageType == MessageType.InterceptedRequest &&
-                !l.MessageLines.First().StartsWith("OPTIONS") &&
+                !l.Message.StartsWith("OPTIONS") &&
                 l.Context?.Session is not null &&
                 l.Context.Session.HttpClient.Request.Headers.Any(h => h.Name.Equals("authorization", StringComparison.OrdinalIgnoreCase))
             );
@@ -116,12 +107,8 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
 
         Debug.Assert(_apiCenterClient is not null);
 
-        if (_apis is null)
-        {
-            _apis = await _apiCenterClient.GetApis();
-        }
-
-        if (_apis is null || !_apis.Any())
+        _apis ??= await _apiCenterClient.GetApisAsync();
+        if (_apis is null || _apis.Length == 0)
         {
             Logger.LogInformation("No APIs found in API Center");
             return;
@@ -129,28 +116,19 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
 
         // get all API definitions by URL so that we can easily match
         // API requests to API definitions, for permissions lookup
-        if (_apiDefinitionsByUrl is null)
-        {
-            _apiDefinitionsByUrl = await _apis.GetApiDefinitionsByUrl(_apiCenterClient, Logger);
-        }
+        _apiDefinitionsByUrl ??= await _apis.GetApiDefinitionsByUrlAsync(_apiCenterClient, Logger);
 
         var (requestsByApiDefinition, unmatchedApicRequests) = GetRequestsByApiDefinition(interceptedRequests, _apiDefinitionsByUrl);
 
-        var errors = new List<ApiCenterMinimalPermissionsPluginReportError>();
+        var errors = new List<ApiPermissionError>();
         var results = new List<ApiCenterMinimalPermissionsPluginReportApiResult>();
         var unmatchedRequests = new List<string>(
-            unmatchedApicRequests.Select(r => r.MessageLines.First())
+            unmatchedApicRequests.Select(r => r.Message)
         );
         
         foreach (var (apiDefinition, requests) in requestsByApiDefinition)
         {
-            var (
-                tokenPermissions,
-                operationsFromRequests,
-                minimalScopes,
-                unmatchedOperations,
-                errorsForApi
-            ) = CheckMinimalPermissions(requests, apiDefinition);
+            var minimalPermissions = CheckMinimalPermissions(requests, apiDefinition);
 
             var api = _apis.FindApiByDefinition(apiDefinition, Logger);
             var result = new ApiCenterMinimalPermissionsPluginReportApiResult
@@ -158,22 +136,22 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
                 ApiId = api?.Id ?? "unknown",
                 ApiName = api?.Properties?.Title ?? "unknown",
                 ApiDefinitionId = apiDefinition.Id!,
-                Requests = operationsFromRequests
-                    .Select(o => $"{o.method} {o.originalUrl}")
+                Requests = minimalPermissions.OperationsFromRequests
+                    .Select(o => $"{o.Method} {o.OriginalUrl}")
                     .Distinct()
                     .ToArray(),
-                TokenPermissions = tokenPermissions.Distinct().ToArray(),
-                MinimalPermissions = minimalScopes,
-                ExcessivePermissions = tokenPermissions.Except(minimalScopes).ToArray(),
-                UsesMinimalPermissions = !tokenPermissions.Except(minimalScopes).Any()
+                TokenPermissions = minimalPermissions.TokenPermissions.Distinct().ToArray(),
+                MinimalPermissions = minimalPermissions.MinimalScopes,
+                ExcessivePermissions = minimalPermissions.TokenPermissions.Except(minimalPermissions.MinimalScopes).ToArray(),
+                UsesMinimalPermissions = !minimalPermissions.TokenPermissions.Except(minimalPermissions.MinimalScopes).Any()
             };
             results.Add(result);
 
-            var unmatchedApiRequests = operationsFromRequests
-                .Where(o => unmatchedOperations.Contains($"{o.method} {o.tokenizedUrl}"))
-                .Select(o => $"{o.method} {o.originalUrl}");
+            var unmatchedApiRequests = minimalPermissions.OperationsFromRequests
+                .Where(o => minimalPermissions.UnmatchedOperations.Contains($"{o.Method} {o.TokenizedUrl}"))
+                .Select(o => $"{o.Method} {o.OriginalUrl}");
             unmatchedRequests.AddRange(unmatchedApiRequests);
-            errors.AddRange(errorsForApi);
+            errors.AddRange(minimalPermissions.Errors);
 
             if (result.UsesMinimalPermissions)
             {
@@ -203,148 +181,32 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
                 );
             }
 
-            if (errorsForApi.Any())
+            if (minimalPermissions.Errors.Count != 0)
             {
                 Logger.LogWarning(
                     "Errors for API {apiName}:{newLine}- {errors}",
                     result.ApiName,
                     Environment.NewLine,
-                    string.Join($"{Environment.NewLine}- ", errorsForApi.Select(e => $"{e.Request}: {e.Error}"))
+                    string.Join($"{Environment.NewLine}- ", minimalPermissions.Errors.Select(e => $"{e.Request}: {e.Error}"))
                 );
             }
         }
 
         var report = new ApiCenterMinimalPermissionsPluginReport()
         {
-            Results = results.ToArray(),
-            UnmatchedRequests = unmatchedRequests.ToArray(),
-            Errors = errors.ToArray()
+            Results = [.. results],
+            UnmatchedRequests = [.. unmatchedRequests],
+            Errors = [.. errors]
         };
 
         StoreReport(report, e);
     }
 
-    private (
-        List<string> tokenPermissions,
-        List<(string method, string originalUrl, string tokenizedUrl)> operationsFromRequests,
-        string[] minimalScopes,
-        string[] unmatchedOperations,
-        List<ApiCenterMinimalPermissionsPluginReportError> errors
-        ) CheckMinimalPermissions(IEnumerable<RequestLog> requests, ApiDefinition apiDefinition)
+    private ApiPermissionsInfo CheckMinimalPermissions(IEnumerable<RequestLog> requests, ApiDefinition apiDefinition)
     {
         Logger.LogInformation("Checking minimal permissions for API {apiName}...", apiDefinition.Definition!.Servers.First().Url);
 
-        var tokenPermissions = new List<string>();
-        var operationsFromRequests = new List<(string method, string originalUrl, string tokenizedUrl)>();
-        var operationsAndScopes = new Dictionary<string, string[]>();
-        var errors = new List<ApiCenterMinimalPermissionsPluginReportError>();
-
-        foreach (var request in requests)
-        {
-            // get scopes from the token
-            var methodAndUrl = request.MessageLines.First();
-            var methodAndUrlChunks = methodAndUrl.Split(' ');
-            Logger.LogDebug("Checking request {request}...", methodAndUrl);
-            var (method, url) = (methodAndUrlChunks[0].ToUpper(), methodAndUrlChunks[1]);
-
-            var scopesFromTheToken = GetScopesFromToken(request.Context?.Session.HttpClient.Request.Headers.First(h => h.Name.Equals("authorization", StringComparison.OrdinalIgnoreCase)).Value);
-            if (scopesFromTheToken.Any())
-            {
-                tokenPermissions.AddRange(scopesFromTheToken);
-            }
-            else
-            {
-                errors.Add(new()
-                {
-                    Request = methodAndUrl,
-                    Error = "No scopes found in the token"
-                });
-            }
-
-            // get allowed scopes for the operation
-            if (!Enum.TryParse<OperationType>(method, true, out var operationType))
-            {
-                errors.Add(new()
-                {
-                    Request = methodAndUrl,
-                    Error = $"{method} is not a valid HTTP method"
-                });
-                continue;
-            }
-
-            var pathItem = apiDefinition.Definition!.FindMatchingPathItem(url, Logger);
-            if (pathItem is null)
-            {
-                errors.Add(new()
-                {
-                    Request = methodAndUrl,
-                    Error = "No matching path item found"
-                });
-                continue;
-            }
-
-            if (!pathItem.Value.Value.Operations.TryGetValue(operationType, out var operation))
-            {
-                errors.Add(new()
-                {
-                    Request = methodAndUrl,
-                    Error = "No matching operation found"
-                });
-                continue;
-            }
-
-            var scopes = operation.GetEffectiveScopes(apiDefinition.Definition!, Logger);
-            if (scopes.Any())
-            {
-                operationsAndScopes[$"{method} {pathItem.Value.Key}"] = scopes;
-            }
-
-            operationsFromRequests.Add((operationType.ToString().ToUpper(), url, pathItem.Value.Key));
-        }
-
-        var (minimalScopes, unmatchedOperations) = GetMinimalScopes(
-            operationsFromRequests
-                .Select(o => $"{o.method} {o.tokenizedUrl}")
-                .Distinct()
-                .ToArray(),
-            operationsAndScopes
-        );
-
-        return (tokenPermissions, operationsFromRequests, minimalScopes, unmatchedOperations, errors);
-    }
-
-    /// <summary>
-    /// Gets the scopes from the JWT token.
-    /// </summary>
-    /// <param name="jwtToken">The JWT token including the 'Bearer' prefix.</param>
-    /// <returns>The scopes from the JWT token or empty array if no scopes found or error occurred.</returns>
-    private string[] GetScopesFromToken(string? jwtToken)
-    {
-        Logger.LogDebug("Getting scopes from JWT token...");
-
-        if (string.IsNullOrEmpty(jwtToken))
-        {
-            return [];
-        }
-
-        try
-        {
-            var token = jwtToken.Split(' ')[1];
-            var handler = new JwtSecurityTokenHandler();
-            var jsonToken = handler.ReadToken(token) as JwtSecurityToken;
-            var scopes = jsonToken?.Claims
-                .Where(c => c.Type == "scp")
-                .Select(c => c.Value)
-                .ToArray() ?? [];
-
-            Logger.LogDebug("Scopes found in the token: {scopes}", string.Join(", ", scopes));
-            return scopes;
-        }
-        catch (Exception ex)
-        {
-            Logger.LogError(ex, "Failed to parse JWT token");
-            return [];
-        }
+        return apiDefinition.Definition.CheckMinimalPermissions(requests, Logger);
     }
 
     private (Dictionary<ApiDefinition, List<RequestLog>> RequestsByApiDefinition, IEnumerable<RequestLog> UnmatchedRequests) GetRequestsByApiDefinition(IEnumerable<RequestLog> interceptedRequests, Dictionary<string, ApiDefinition> apiDefinitionsByUrl)
@@ -353,7 +215,7 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
         var requestsByApiDefinition = new Dictionary<ApiDefinition, List<RequestLog>>();
         foreach (var request in interceptedRequests)
         {
-            var url = request.MessageLines.First().Split(' ')[1];
+            var url = request.Message.Split(' ')[1];
             Logger.LogDebug("Matching request {requestUrl} to API definitions...", url);
 
             var matchingKey = apiDefinitionsByUrl.Keys.FirstOrDefault(url.StartsWith);
@@ -364,47 +226,15 @@ public class ApiCenterMinimalPermissionsPlugin : BaseReportingPlugin
                 continue;
             }
 
-            if (!requestsByApiDefinition.ContainsKey(apiDefinitionsByUrl[matchingKey]))
+            if (!requestsByApiDefinition.TryGetValue(apiDefinitionsByUrl[matchingKey], out List<RequestLog>? value))
             {
-                requestsByApiDefinition[apiDefinitionsByUrl[matchingKey]] = new();
+                value = [];
+                requestsByApiDefinition[apiDefinitionsByUrl[matchingKey]] = value;
             }
-            requestsByApiDefinition[apiDefinitionsByUrl[matchingKey]].Add(request);
+
+            value.Add(request);
         }
 
         return (requestsByApiDefinition, unmatchedRequests);
-    }
-
-    (string[] minimalScopes, string[] unmatchedOperations) GetMinimalScopes(string[] requests, Dictionary<string, string[]> operationsAndScopes)
-    {
-        var unmatchedOperations = requests
-            .Where(o => !operationsAndScopes.Keys.Contains(o, StringComparer.OrdinalIgnoreCase))
-            .ToArray();
-
-        var minimalScopesPerOperation = operationsAndScopes
-            .Where(o => requests.Contains(o.Key, StringComparer.OrdinalIgnoreCase))
-            .Select(o => new KeyValuePair<string, string>(o.Key, o.Value.First()))
-            .ToDictionary();
-
-        // for each minimal scope check if it overrules any other minimal scope
-        // (position > 0, because the minimal scope is always first). if it does,
-        // replace the minimal scope with the overruling scope
-        foreach (var scope in minimalScopesPerOperation.Values)
-        {
-            foreach (var minimalScope in minimalScopesPerOperation)
-            {
-                if (Array.IndexOf(operationsAndScopes[minimalScope.Key], scope) > 0)
-                {
-                    minimalScopesPerOperation[minimalScope.Key] = scope;
-                }
-            }
-        }
-
-        return (
-            minimalScopesPerOperation
-                .Select(s => s.Value)
-                .Distinct()
-                .ToArray(),
-            unmatchedOperations
-        );
     }
 }

@@ -1,15 +1,17 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Security.Cryptography.X509Certificates;
 using System.Text.Json.Serialization;
+using DevProxy.Abstractions.LanguageModel;
 using Titanium.Web.Proxy;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Http;
 
-namespace Microsoft.DevProxy.Abstractions;
+namespace DevProxy.Abstractions;
 
 public interface IProxyContext
 {
@@ -18,14 +20,14 @@ public interface IProxyContext
     ILanguageModelClient LanguageModelClient { get; }
 }
 
-public class ThrottlerInfo
+public class ThrottlerInfo(string throttlingKey, Func<Request, string, ThrottlingInfo> shouldThrottle, DateTime resetTime)
 {
     /// <summary>
     /// Throttling key used to identify which requests should be throttled.
     /// Can be set to a hostname, full URL or a custom string value, that
     /// represents for example a portion of the API
     /// </summary>
-    public string ThrottlingKey { get; private set; }
+    public string ThrottlingKey { get; private set; } = throttlingKey ?? throw new ArgumentNullException(nameof(throttlingKey));
     /// <summary>
     /// Function responsible for matching the request to the throttling key.
     /// Takes as arguments:
@@ -34,36 +36,23 @@ public class ThrottlerInfo
     /// Returns an instance of ThrottlingInfo that contains information
     /// whether the request should be throttled or not.
     /// </summary>
-    public Func<Request, string, ThrottlingInfo> ShouldThrottle { get; private set; }
+    public Func<Request, string, ThrottlingInfo> ShouldThrottle { get; private set; } = shouldThrottle ?? throw new ArgumentNullException(nameof(shouldThrottle));
     /// <summary>
     /// Time when the throttling window will be reset
     /// </summary>
-    public DateTime ResetTime { get; set; }
-
-    public ThrottlerInfo(string throttlingKey, Func<Request, string, ThrottlingInfo> shouldThrottle, DateTime resetTime)
-    {
-        ThrottlingKey = throttlingKey ?? throw new ArgumentNullException(nameof(throttlingKey));
-        ShouldThrottle = shouldThrottle ?? throw new ArgumentNullException(nameof(shouldThrottle));
-        ResetTime = resetTime;
-    }
+    public DateTime ResetTime { get; set; } = resetTime;
 }
 
-public class ThrottlingInfo
+public class ThrottlingInfo(int throttleForSeconds, string retryAfterHeaderName)
 {
-    public int ThrottleForSeconds { get; set; }
-    public string RetryAfterHeaderName { get; set; }
-
-    public ThrottlingInfo(int throttleForSeconds, string retryAfterHeaderName)
-    {
-        ThrottleForSeconds = throttleForSeconds;
-        RetryAfterHeaderName = retryAfterHeaderName ?? throw new ArgumentNullException(nameof(retryAfterHeaderName));
-    }
+    public int ThrottleForSeconds { get; set; } = throttleForSeconds;
+    public string RetryAfterHeaderName { get; set; } = retryAfterHeaderName ?? throw new ArgumentNullException(nameof(retryAfterHeaderName));
 }
 
 public class ProxyEventArgsBase
 {
-    public Dictionary<string, object> SessionData { get; set; } = new Dictionary<string, object>();
-    public Dictionary<string, object> GlobalData { get; set; } = new Dictionary<string, object>();
+    public Dictionary<string, object> SessionData { get; set; } = [];
+    public Dictionary<string, object> GlobalData { get; set; } = [];
 }
 
 public class ProxyHttpEventArgsBase : ProxyEventArgsBase
@@ -82,26 +71,18 @@ public class ProxyHttpEventArgsBase : ProxyEventArgsBase
     }
 }
 
-public class ProxyRequestArgs : ProxyHttpEventArgsBase
+public class ProxyRequestArgs(SessionEventArgs session, ResponseState responseState) : ProxyHttpEventArgsBase(session)
 {
-    public ProxyRequestArgs(SessionEventArgs session, ResponseState responseState) : base(session)
-    {
-        ResponseState = responseState ?? throw new ArgumentNullException(nameof(responseState));
-    }
-    public ResponseState ResponseState { get; }
+    public ResponseState ResponseState { get; } = responseState ?? throw new ArgumentNullException(nameof(responseState));
 
     public bool ShouldExecute(ISet<UrlToWatch> watchedUrls) =>
         !ResponseState.HasBeenSet
         && HasRequestUrlMatch(watchedUrls);
 }
 
-public class ProxyResponseArgs : ProxyHttpEventArgsBase
+public class ProxyResponseArgs(SessionEventArgs session, ResponseState responseState) : ProxyHttpEventArgsBase(session)
 {
-    public ProxyResponseArgs(SessionEventArgs session, ResponseState responseState) : base(session)
-    {
-        ResponseState = responseState ?? throw new ArgumentNullException(nameof(responseState));
-    }
-    public ResponseState ResponseState { get; }
+    public ResponseState ResponseState { get; } = responseState ?? throw new ArgumentNullException(nameof(responseState));
 }
 
 public class InitArgs
@@ -111,49 +92,44 @@ public class InitArgs
     }
 }
 
-public class OptionsLoadedArgs
+public class OptionsLoadedArgs(InvocationContext context, Option[] options)
 {
-    public InvocationContext Context { get; set; }
-    public Option[] Options { get; set; }
-
-    public OptionsLoadedArgs(InvocationContext context, Option[] options)
-    {
-        Context = context ?? throw new ArgumentNullException(nameof(context));
-        Options = options ?? throw new ArgumentNullException(nameof(options));
-    }
+    public InvocationContext Context { get; set; } = context ?? throw new ArgumentNullException(nameof(context));
+    public Option[] Options { get; set; } = options ?? throw new ArgumentNullException(nameof(options));
 }
 
 public class RequestLog
 {
-    public string[] MessageLines { get; set; }
+    public string Message { get; set; }
     public MessageType MessageType { get; set; }
     [JsonIgnore]
     public LoggingContext? Context { get; set; }
     public string? Method { get; init; }
     public string? Url { get; init; }
+    public string? PluginName { get; set; }
 
-    public RequestLog(string[] messageLines, MessageType messageType, LoggingContext? context) :
-        this(messageLines, messageType, context?.Session.HttpClient.Request.Method, context?.Session.HttpClient.Request.Url, context)
+    public RequestLog(string message, MessageType messageType, LoggingContext? context) :
+        this(message, messageType, context?.Session.HttpClient.Request.Method, context?.Session.HttpClient.Request.Url, context)
     {
     }
 
-    public RequestLog(string[] messageLines, MessageType messageType, string method, string url) :
-        this(messageLines, messageType, method, url, context: null)
+    public RequestLog(string message, MessageType messageType, string method, string url) :
+        this(message, messageType, method, url, context: null)
     {
     }
 
-    private RequestLog(string[] messageLines, MessageType messageType, string? method, string? url, LoggingContext? context)
+    private RequestLog(string message, MessageType messageType, string? method, string? url, LoggingContext? context)
     {
-        MessageLines = messageLines ?? throw new ArgumentNullException(nameof(messageLines));
+        Message = message ?? throw new ArgumentNullException(nameof(message));
         MessageType = messageType;
         Context = context;
         Method = method;
         Url = url;
     }
 
-    public void Deconstruct(out string[] message, out MessageType messageType, out LoggingContext? context, out string? method, out string? url)
+    public void Deconstruct(out string message, out MessageType messageType, out LoggingContext? context, out string? method, out string? url)
     {
-        message = MessageLines;
+        message = Message;
         messageType = MessageType;
         context = Context;
         method = Method;
@@ -161,22 +137,14 @@ public class RequestLog
     }
 }
 
-public class RecordingArgs : ProxyEventArgsBase
+public class RecordingArgs(IEnumerable<RequestLog> requestLogs) : ProxyEventArgsBase
 {
-    public RecordingArgs(IEnumerable<RequestLog> requestLogs)
-    {
-        RequestLogs = requestLogs ?? throw new ArgumentNullException(nameof(requestLogs));
-    }
-    public IEnumerable<RequestLog> RequestLogs { get; set; }
+    public IEnumerable<RequestLog> RequestLogs { get; set; } = requestLogs ?? throw new ArgumentNullException(nameof(requestLogs));
 }
 
-public class RequestLogArgs
+public class RequestLogArgs(RequestLog requestLog)
 {
-    public RequestLogArgs(RequestLog requestLog)
-    {
-        RequestLog = requestLog ?? throw new ArgumentNullException(nameof(requestLog));
-    }
-    public RequestLog RequestLog { get; set; }
+    public RequestLog RequestLog { get; set; } = requestLog ?? throw new ArgumentNullException(nameof(requestLog));
 }
 
 public interface IPluginEvents
@@ -209,7 +177,7 @@ public interface IPluginEvents
     /// <summary>
     /// Raised after request message has been logged.
     /// </summary>
-    event EventHandler<RequestLogArgs>? AfterRequestLog;
+    event AsyncEventHandler<RequestLogArgs>? AfterRequestLog;
     /// <summary>
     /// Raised after recording request logs has stopped.
     /// </summary>
@@ -218,6 +186,15 @@ public interface IPluginEvents
     /// Raised when user requested issuing mock requests.
     /// </summary>
     event AsyncEventHandler<EventArgs>? MockRequest;
+
+    void RaiseInit(InitArgs args);
+    void RaiseOptionsLoaded(OptionsLoadedArgs args);
+    Task RaiseProxyBeforeRequestAsync(ProxyRequestArgs args, ExceptionHandler? exceptionFunc = null);
+    Task RaiseProxyBeforeResponseAsync(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null);
+    Task RaiseProxyAfterResponseAsync(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null);
+    Task RaiseRequestLoggedAsync(RequestLogArgs args, ExceptionHandler? exceptionFunc = null);
+    Task RaiseRecordingStoppedAsync(RecordingArgs args, ExceptionHandler? exceptionFunc = null);
+    Task RaiseMockRequestAsync(EventArgs args, ExceptionHandler? exceptionFunc = null);
 }
 
 public class PluginEvents : IPluginEvents
@@ -233,7 +210,7 @@ public class PluginEvents : IPluginEvents
     /// <inheritdoc />
     public event AsyncEventHandler<ProxyResponseArgs>? AfterResponse;
     /// <inheritdoc />
-    public event EventHandler<RequestLogArgs>? AfterRequestLog;
+    public event AsyncEventHandler<RequestLogArgs>? AfterRequestLog;
     /// <inheritdoc />
     public event AsyncEventHandler<RecordingArgs>? AfterRecordingStop;
     public event AsyncEventHandler<EventArgs>? MockRequest;
@@ -248,7 +225,7 @@ public class PluginEvents : IPluginEvents
         OptionsLoaded?.Invoke(this, args);
     }
 
-    public async Task RaiseProxyBeforeRequest(ProxyRequestArgs args, ExceptionHandler? exceptionFunc = null)
+    public async Task RaiseProxyBeforeRequestAsync(ProxyRequestArgs args, ExceptionHandler? exceptionFunc = null)
     {
         if (BeforeRequest is not null)
         {
@@ -256,7 +233,7 @@ public class PluginEvents : IPluginEvents
         }
     }
 
-    public async Task RaiseProxyBeforeResponse(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null)
+    public async Task RaiseProxyBeforeResponseAsync(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null)
     {
         if (BeforeResponse is not null)
         {
@@ -264,7 +241,7 @@ public class PluginEvents : IPluginEvents
         }
     }
 
-    public async Task RaiseProxyAfterResponse(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null)
+    public async Task RaiseProxyAfterResponseAsync(ProxyResponseArgs args, ExceptionHandler? exceptionFunc = null)
     {
         if (AfterResponse is not null)
         {
@@ -272,12 +249,15 @@ public class PluginEvents : IPluginEvents
         }
     }
 
-    public void RaiseRequestLogged(RequestLogArgs args)
+    public async Task RaiseRequestLoggedAsync(RequestLogArgs args, ExceptionHandler? exceptionFunc = null)
     {
-        AfterRequestLog?.Invoke(this, args);
+        if (AfterRequestLog is not null)
+        {
+            await AfterRequestLog.InvokeAsync(this, args, exceptionFunc);
+        }
     }
 
-    public async Task RaiseRecordingStopped(RecordingArgs args, ExceptionHandler? exceptionFunc = null)
+    public async Task RaiseRecordingStoppedAsync(RecordingArgs args, ExceptionHandler? exceptionFunc = null)
     {
         if (AfterRecordingStop is not null)
         {
@@ -285,7 +265,7 @@ public class PluginEvents : IPluginEvents
         }
     }
 
-    public async Task RaiseMockRequest(EventArgs args, ExceptionHandler? exceptionFunc = null)
+    public async Task RaiseMockRequestAsync(EventArgs args, ExceptionHandler? exceptionFunc = null)
     {
         if (MockRequest is not null)
         {

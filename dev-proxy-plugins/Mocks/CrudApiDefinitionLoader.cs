@@ -1,23 +1,17 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
-internal class CrudApiDefinitionLoader : IDisposable
+internal class CrudApiDefinitionLoader(ILogger logger, CrudApiConfiguration configuration) : IDisposable
 {
-    private readonly ILogger _logger;
-    private readonly CrudApiConfiguration _configuration;
-
-    public CrudApiDefinitionLoader(ILogger logger, CrudApiConfiguration configuration)
-    {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-    }
-
+    private readonly ILogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    private readonly CrudApiConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
     private FileSystemWatcher? _watcher;
 
     public void LoadApiDefinition()
@@ -79,7 +73,7 @@ internal class CrudApiDefinitionLoader : IDisposable
         if (!File.Exists(_configuration.ApiFile))
         {
             _logger.LogWarning("File {configurationFile} not found. No CRUD API will be provided", _configuration.ApiFile);
-            _configuration.Actions = Array.Empty<CrudApiAction>();
+            _configuration.Actions = [];
             return;
         }
 

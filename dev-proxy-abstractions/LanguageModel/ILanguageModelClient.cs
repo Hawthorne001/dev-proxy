@@ -1,11 +1,12 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-namespace Microsoft.DevProxy.Abstractions;
+namespace DevProxy.Abstractions.LanguageModel;
 
 public interface ILanguageModelClient
 {
-    Task<ILanguageModelCompletionResponse?> GenerateChatCompletion(ILanguageModelChatCompletionMessage[] messages);
-    Task<ILanguageModelCompletionResponse?> GenerateCompletion(string prompt);
-    Task<bool> IsEnabled();
+    Task<ILanguageModelCompletionResponse?> GenerateChatCompletionAsync(ILanguageModelChatCompletionMessage[] messages);
+    Task<ILanguageModelCompletionResponse?> GenerateCompletionAsync(string prompt);
+    Task<bool> IsEnabledAsync();
 }

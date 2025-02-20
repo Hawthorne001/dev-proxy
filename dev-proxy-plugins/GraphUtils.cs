@@ -1,12 +1,13 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Net.Http.Json;
-using Microsoft.DevProxy.Plugins.RequestLogs.MinimalPermissions;
+using DevProxy.Plugins.MinimalPermissions;
 using Microsoft.Extensions.Logging;
 using Titanium.Web.Proxy.Http;
 
-namespace Microsoft.DevProxy.Plugins;
+namespace DevProxy.Plugins;
 
 public class GraphUtils
 {
@@ -31,17 +32,17 @@ public class GraphUtils
         return workload;
     }
 
-    internal static string GetScopeTypeString(PermissionsType type)
+    internal static string GetScopeTypeString(GraphPermissionsType type)
     {
         return type switch
         {
-            PermissionsType.Application => "Application",
-            PermissionsType.Delegated => "DelegatedWork",
+            GraphPermissionsType.Application => "Application",
+            GraphPermissionsType.Delegated => "DelegatedWork",
             _ => throw new InvalidOperationException($"Unknown scope type: {type}")
         };
     }
 
-    internal static async Task<IEnumerable<string>> UpdateUserScopes(IEnumerable<string> minimalScopes, IEnumerable<(string method, string url)> endpoints, PermissionsType permissionsType, ILogger logger)
+    internal static async Task<IEnumerable<string>> UpdateUserScopesAsync(IEnumerable<string> minimalScopes, IEnumerable<(string method, string url)> endpoints, GraphPermissionsType permissionsType, ILogger logger)
     {
         var userEndpoints = endpoints.Where(e => e.url.Contains("/users/{", StringComparison.OrdinalIgnoreCase));
         if (!userEndpoints.Any())
@@ -51,7 +52,7 @@ public class GraphUtils
 
         var newMinimalScopes = new HashSet<string>(minimalScopes);
 
-        var url = $"https://graphexplorerapi.azurewebsites.net/permissions?scopeType={GetScopeTypeString(permissionsType)}";
+        var url = $"https://devxapi-func-prod-eastus.azurewebsites.net/permissions?scopeType={GetScopeTypeString(permissionsType)}";
         using var httpClient = new HttpClient();
         var urls = userEndpoints.Select(e => {
             logger.LogDebug("Getting permissions for {method} {url}", e.method, e.url);
@@ -59,7 +60,7 @@ public class GraphUtils
         });
         var tasks = urls.Select(u => {
             logger.LogTrace("Calling {url}...", u);
-            return httpClient.GetFromJsonAsync<PermissionInfo[]>(u);
+            return httpClient.GetFromJsonAsync<GraphPermissionInfo[]>(u);
         });
         await Task.WhenAll(tasks);
 

@@ -1,5 +1,6 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Diagnostics;
 using System.Net;
@@ -7,17 +8,18 @@ using System.Net.Sockets;
 using System.Runtime.InteropServices;
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.DevProxy.Plugins.Inspection.CDP;
+using DevProxy.Abstractions;
+using DevProxy.Plugins.Inspection.CDP;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.Inspection;
+namespace DevProxy.Plugins.Inspection;
 
 public enum PreferredBrowser
 {
     Edge,
     Chrome,
-    EdgeDev
+    EdgeDev,
+    EdgeBeta
 }
 
 public class DevToolsPluginConfiguration
@@ -33,29 +35,24 @@ public class DevToolsPluginConfiguration
     public string PreferredBrowserPath { get; set; } = string.Empty;
 }
 
-public class DevToolsPlugin : BaseProxyPlugin
+public class DevToolsPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
-    private string socketUrl = string.Empty;
     private WebSocketServer? webSocket;
-    private Dictionary<string, GetResponseBodyResultParams> responseBody = new();
+    private readonly Dictionary<string, GetResponseBodyResultParams> responseBody = [];
 
     public override string Name => nameof(DevToolsPlugin);
     private readonly DevToolsPluginConfiguration _configuration = new();
 
-    public DevToolsPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
+    public override async Task RegisterAsync()
     {
-    }
-
-    public override void Register()
-    {
-        base.Register();
+        await base.RegisterAsync();
         ConfigSection?.Bind(_configuration);
 
         InitInspector();
 
-        PluginEvents.BeforeRequest += BeforeRequest;
-        PluginEvents.AfterResponse += AfterResponse;
-        PluginEvents.AfterRequestLog += AfterRequestLog;
+        PluginEvents.BeforeRequest += BeforeRequestAsync;
+        PluginEvents.AfterResponse += AfterResponseAsync;
+        PluginEvents.AfterRequestLog += AfterRequestLogAsync;
     }
 
     private static int GetFreePort()
@@ -82,6 +79,7 @@ public class DevToolsPlugin : BaseProxyPlugin
                 PreferredBrowser.Chrome => Environment.ExpandEnvironmentVariables(@"%ProgramFiles%\Google\Chrome\Application\chrome.exe"),
                 PreferredBrowser.Edge => Environment.ExpandEnvironmentVariables(@"%ProgramFiles(x86)%\Microsoft\Edge\Application\msedge.exe"),
                 PreferredBrowser.EdgeDev => Environment.ExpandEnvironmentVariables(@"%ProgramFiles(x86)%\Microsoft\Edge Dev\Application\msedge.exe"),
+                PreferredBrowser.EdgeBeta => Environment.ExpandEnvironmentVariables(@"%ProgramFiles(x86)%\Microsoft\Edge Beta\Application\msedge.exe"),
                 _ => throw new NotSupportedException($"{configuration.PreferredBrowser} is an unsupported browser. Please change your PreferredBrowser setting for {Name}.")
             };
         }
@@ -92,6 +90,7 @@ public class DevToolsPlugin : BaseProxyPlugin
                 PreferredBrowser.Chrome => "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
                 PreferredBrowser.Edge => "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
                 PreferredBrowser.EdgeDev => "/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Dev",
+                PreferredBrowser.EdgeBeta => "/Applications/Microsoft Edge Dev.app/Contents/MacOS/Microsoft Edge Beta",
                 _ => throw new NotSupportedException($"{configuration.PreferredBrowser} is an unsupported browser. Please change your PreferredBrowser setting for {Name}.")
             };
         }
@@ -102,6 +101,7 @@ public class DevToolsPlugin : BaseProxyPlugin
                 PreferredBrowser.Chrome => "/opt/google/chrome/chrome",
                 PreferredBrowser.Edge => "/opt/microsoft/msedge/msedge",
                 PreferredBrowser.EdgeDev => "/opt/microsoft/msedge-dev/msedge",
+                PreferredBrowser.EdgeBeta => "/opt/microsoft/msedge-beta/msedge",
                 _ => throw new NotSupportedException($"{configuration.PreferredBrowser} is an unsupported browser. Please change your PreferredBrowser setting for {Name}.")
             };
         }
@@ -114,8 +114,17 @@ public class DevToolsPlugin : BaseProxyPlugin
     private Process[] GetBrowserProcesses(string browserPath)
     {
         return Process.GetProcesses().Where(p =>
-            p.MainModule is not null && p.MainModule.FileName == browserPath
-        ).ToArray();
+        {
+            try
+            {
+                return p.MainModule is not null && p.MainModule.FileName == browserPath;
+            }
+            catch (Exception ex)
+            {
+                Logger.LogDebug("Error while checking process: {Ex}", ex.Message);
+                return false;
+            }
+        }).ToArray();
     }
 
     private void InitInspector()
@@ -152,7 +161,7 @@ public class DevToolsPlugin : BaseProxyPlugin
         var port = GetFreePort();
         webSocket = new WebSocketServer(port, Logger);
         webSocket.MessageReceived += SocketMessageReceived;
-        webSocket.Start();
+        _ = webSocket.StartAsync();
 
         var inspectionUrl = $"http://localhost:9222/devtools/inspector.html?ws=localhost:{port}";
         var args = $"{inspectionUrl} --remote-debugging-port=9222 --profile-directory=devproxy";
@@ -188,7 +197,7 @@ public class DevToolsPlugin : BaseProxyPlugin
             {
                 var requestId = message.Params?.RequestId;
                 if (requestId is null ||
-                    !responseBody.ContainsKey(requestId) ||
+                    !responseBody.TryGetValue(requestId, out GetResponseBodyResultParams? value) ||
                     // should never happen because the message is sent from devtools
                     // and Id is required on all socket messages but theoretically
                     // it is possible
@@ -202,8 +211,8 @@ public class DevToolsPlugin : BaseProxyPlugin
                     Id = (int)message.Id,
                     Result = new()
                     {
-                        Body = responseBody[requestId].Body,
-                        Base64Encoded = responseBody[requestId].Base64Encoded
+                        Body = value.Body,
+                        Base64Encoded = value.Base64Encoded
                     }
                 };
                 _ = webSocket.SendAsync(result);
@@ -212,7 +221,7 @@ public class DevToolsPlugin : BaseProxyPlugin
         catch { }
     }
 
-    private string GetRequestId(Titanium.Web.Proxy.Http.Request? request)
+    private static string GetRequestId(Titanium.Web.Proxy.Http.Request? request)
     {
         if (request is null)
         {
@@ -222,7 +231,7 @@ public class DevToolsPlugin : BaseProxyPlugin
         return request.GetHashCode().ToString();
     }
 
-    private async Task BeforeRequest(object sender, ProxyRequestArgs e)
+    private async Task BeforeRequestAsync(object sender, ProxyRequestArgs e)
     {
         if (webSocket?.IsConnected != true)
         {
@@ -264,14 +273,14 @@ public class DevToolsPlugin : BaseProxyPlugin
             {
                 RequestId = requestId,
                 // must be included in the message or the message will be rejected
-                AssociatedCookies = new object[0],
+                AssociatedCookies = [],
                 Headers = headers
             }
         };
         await webSocket.SendAsync(requestWillBeSentExtraInfoMessage);
     }
 
-    private async Task AfterResponse(object sender, ProxyResponseArgs e)
+    private async Task AfterResponseAsync(object sender, ProxyResponseArgs e)
     {
         if (webSocket?.IsConnected != true)
         {
@@ -283,15 +292,18 @@ public class DevToolsPlugin : BaseProxyPlugin
             Body = string.Empty,
             Base64Encoded = false
         };
-        if (IsTextResponse(e.Session.HttpClient.Response.ContentType))
+        if (e.Session.HttpClient.Response.HasBody)
         {
-            body.Body = e.Session.HttpClient.Response.BodyString;
-            body.Base64Encoded = false;
-        }
-        else
-        {
-            body.Body = Convert.ToBase64String(e.Session.HttpClient.Response.Body);
-            body.Base64Encoded = true;
+            if (IsTextResponse(e.Session.HttpClient.Response.ContentType))
+            {
+                body.Body = e.Session.HttpClient.Response.BodyString;
+                body.Base64Encoded = false;
+            }
+            else
+            {
+                body.Body = Convert.ToBase64String(e.Session.HttpClient.Response.Body);
+                body.Base64Encoded = true;
+            }
         }
         responseBody.Add(e.Session.HttpClient.Request.GetHashCode().ToString(), body);
 
@@ -331,7 +343,7 @@ public class DevToolsPlugin : BaseProxyPlugin
         await webSocket.SendAsync(loadingFinishedMessage);
     }
 
-    private bool IsTextResponse(string? contentType)
+    private static bool IsTextResponse(string? contentType)
     {
         var isTextResponse = false;
 
@@ -345,7 +357,7 @@ public class DevToolsPlugin : BaseProxyPlugin
         return isTextResponse;
     }
 
-    private async void AfterRequestLog(object? sender, RequestLogArgs e)
+    private async Task AfterRequestLogAsync(object? sender, RequestLogArgs e)
     {
         if (webSocket?.IsConnected != true ||
             e.RequestLog.MessageType == MessageType.InterceptedRequest ||
@@ -361,7 +373,7 @@ public class DevToolsPlugin : BaseProxyPlugin
                 Entry = new()
                 {
                     Source = "network",
-                    Text = string.Join(" ", e.RequestLog.MessageLines),
+                    Text = string.Join(" ", e.RequestLog.Message),
                     Level = Entry.GetLevel(e.RequestLog.MessageType),
                     Timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds(),
                     Url = e.RequestLog.Context?.Session.HttpClient.Request.Url,

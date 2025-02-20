@@ -1,8 +1,9 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Configuration;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Titanium.Web.Proxy.EventArguments;
 using Microsoft.OpenApi.Models;
 using Microsoft.OpenApi.Extensions;
@@ -14,8 +15,10 @@ using Titanium.Web.Proxy.Http;
 using System.Web;
 using System.Collections.Specialized;
 using Microsoft.Extensions.Logging;
+using DevProxy.Abstractions.LanguageModel;
+using System.Text.Json.Serialization;
 
-namespace Microsoft.DevProxy.Plugins.RequestLogs;
+namespace DevProxy.Plugins.RequestLogs;
 
 public class OpenApiSpecGeneratorPluginReportItem
 {
@@ -41,12 +44,30 @@ class GeneratedByOpenApiExtension : IOpenApiExtension
     }
 }
 
+[JsonConverter(typeof(JsonStringEnumConverter))]
+internal enum SpecVersion
+{
+    v2_0,
+    v3_0
+}
+
+[JsonConverter(typeof(JsonStringEnumConverter))]
+internal enum SpecFormat
+{
+    Json,
+    Yaml
+}
+
 internal class OpenApiSpecGeneratorPluginConfiguration
 {
     public bool IncludeOptionsRequests { get; set; } = false;
+
+    public SpecVersion SpecVersion { get; set; } = SpecVersion.v3_0;
+
+    public SpecFormat SpecFormat { get; set; } = SpecFormat.Json;
 }
 
-public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
+public class OpenApiSpecGeneratorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseReportingPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     // from: https://github.com/jonluca/har-to-openapi/blob/0d44409162c0a127cdaccd60b0a270ecd361b829/src/utils/headers.ts
     private static readonly string[] standardHeaders =
@@ -281,24 +302,20 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         "apikey"
     ];
 
-    public OpenApiSpecGeneratorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(OpenApiSpecGeneratorPlugin);
-    private OpenApiSpecGeneratorPluginConfiguration _configuration = new();
+    private readonly OpenApiSpecGeneratorPluginConfiguration _configuration = new();
     public static readonly string GeneratedOpenApiSpecsKey = "GeneratedOpenApiSpecs";
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         ConfigSection?.Bind(_configuration);
 
-        PluginEvents.AfterRecordingStop += AfterRecordingStop;
+        PluginEvents.AfterRecordingStop += AfterRecordingStopAsync;
     }
 
-    private async Task AfterRecordingStop(object? sender, RecordingArgs e)
+    private async Task AfterRecordingStopAsync(object? sender, RecordingArgs e)
     {
         Logger.LogInformation("Creating OpenAPI spec from recorded requests...");
 
@@ -320,13 +337,13 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
             }
 
             if (!_configuration.IncludeOptionsRequests &&
-                String.Equals(request.Context.Session.HttpClient.Request.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
+                string.Equals(request.Context.Session.HttpClient.Request.Method, "OPTIONS", StringComparison.OrdinalIgnoreCase))
             {
                 Logger.LogDebug("Skipping OPTIONS request {url}...", request.Context.Session.HttpClient.Request.RequestUri);
                 continue;
             }
 
-            var methodAndUrlString = request.MessageLines.First();
+            var methodAndUrlString = request.Message.First();
             Logger.LogDebug("Processing request {methodAndUrlString}...", methodAndUrlString);
 
             try
@@ -334,12 +351,12 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
                 var pathItem = GetOpenApiPathItem(request.Context.Session);
                 var parametrizedPath = ParametrizePath(pathItem, request.Context.Session.HttpClient.Request.RequestUri);
                 var operationInfo = pathItem.Operations.First();
-                operationInfo.Value.OperationId = await GetOperationId(
+                operationInfo.Value.OperationId = await GetOperationIdAsync(
                     operationInfo.Key.ToString(),
                     request.Context.Session.HttpClient.Request.RequestUri.GetLeftPart(UriPartial.Authority),
                     parametrizedPath
                 );
-                operationInfo.Value.Description = await GetOperationDescription(
+                operationInfo.Value.Description = await GetOperationDescriptionAsync(
                     operationInfo.Key.ToString(),
                     request.Context.Session.HttpClient.Request.RequestUri.GetLeftPart(UriPartial.Authority),
                     parametrizedPath
@@ -357,8 +374,21 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         foreach (var openApiDoc in openApiDocs)
         {
             var server = openApiDoc.Servers.First();
-            var fileName = GetFileNameFromServerUrl(server.Url);
-            var docString = openApiDoc.SerializeAsJson(OpenApiSpecVersion.OpenApi3_0);
+            var fileName = GetFileNameFromServerUrl(server.Url, _configuration.SpecFormat);
+
+            var openApiSpecVersion = _configuration.SpecVersion switch
+            {
+                SpecVersion.v2_0 => OpenApiSpecVersion.OpenApi2_0,
+                SpecVersion.v3_0 => OpenApiSpecVersion.OpenApi3_0,
+                _ => OpenApiSpecVersion.OpenApi3_0
+            };
+
+            var docString = _configuration.SpecFormat switch
+            {
+                SpecFormat.Json => openApiDoc.SerializeAsJson(openApiSpecVersion),
+                SpecFormat.Yaml => openApiDoc.SerializeAsYaml(openApiSpecVersion),
+                _ => openApiDoc.SerializeAsJson(openApiSpecVersion)
+            };
 
             Logger.LogDebug("  Writing OpenAPI spec to {fileName}...", fileName);
             File.WriteAllText(fileName, docString);
@@ -369,12 +399,12 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         }
 
         StoreReport(new OpenApiSpecGeneratorPluginReport(
-                generatedOpenApiSpecs
-                .Select(kvp => new OpenApiSpecGeneratorPluginReportItem
-                {
-                    ServerUrl = kvp.Key,
-                    FileName = kvp.Value
-                })), e);
+            generatedOpenApiSpecs
+            .Select(kvp => new OpenApiSpecGeneratorPluginReportItem
+            {
+                ServerUrl = kvp.Key,
+                FileName = kvp.Value
+            })), e);
 
         // store the generated OpenAPI specs in the global data
         // for use by other plugins
@@ -388,7 +418,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
      * @param requestUri The request URI.
      * @returns The parametrized server-relative URL
      */
-    private string ParametrizePath(OpenApiPathItem pathItem, Uri requestUri)
+    private static string ParametrizePath(OpenApiPathItem pathItem, Uri requestUri)
     {
         var segments = requestUri.Segments;
         var previousSegment = "item";
@@ -423,13 +453,13 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         return string.Join(string.Empty, segments);
     }
 
-    private bool IsParametrizable(string segment)
+    private static bool IsParametrizable(string segment)
     {
         return Guid.TryParse(segment.Trim('/'), out _) ||
           int.TryParse(segment.Trim('/'), out _);
     }
 
-    private string GetLastNonTokenSegment(string[] segments)
+    private static string GetLastNonTokenSegment(string[] segments)
     {
         for (var i = segments.Length - 1; i >= 0; i--)
         {
@@ -448,22 +478,24 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         return "item";
     }
 
-    private async Task<string> GetOperationId(string method, string serverUrl, string parametrizedPath)
+    private async Task<string> GetOperationIdAsync(string method, string serverUrl, string parametrizedPath)
     {
         var prompt = $"For the specified request, generate an operation ID, compatible with an OpenAPI spec. Respond with just the ID in plain-text format. For example, for request such as `GET https://api.contoso.com/books/{{books-id}}` you return `getBookById`. For a request like `GET https://api.contoso.com/books/{{books-id}}/authors` you return `getAuthorsForBookById`. Request: {method.ToUpper()} {serverUrl}{parametrizedPath}";
         ILanguageModelCompletionResponse? id = null;
-        if (await Context.LanguageModelClient.IsEnabled()) {
-            id = await Context.LanguageModelClient.GenerateCompletion(prompt);
+        if (await Context.LanguageModelClient.IsEnabledAsync())
+        {
+            id = await Context.LanguageModelClient.GenerateCompletionAsync(prompt);
         }
         return id?.Response ?? $"{method}{parametrizedPath.Replace('/', '.')}";
     }
 
-    private async Task<string> GetOperationDescription(string method, string serverUrl, string parametrizedPath)
+    private async Task<string> GetOperationDescriptionAsync(string method, string serverUrl, string parametrizedPath)
     {
         var prompt = $"You're an expert in OpenAPI. You help developers build great OpenAPI specs for use with LLMs. For the specified request, generate a one-sentence description. Respond with just the description. For example, for a request such as `GET https://api.contoso.com/books/{{books-id}}` you return `Get a book by ID`. Request: {method.ToUpper()} {serverUrl}{parametrizedPath}";
         ILanguageModelCompletionResponse? description = null;
-        if (await Context.LanguageModelClient.IsEnabled()) {
-            description = await Context.LanguageModelClient.GenerateCompletion(prompt);
+        if (await Context.LanguageModelClient.IsEnabledAsync())
+        {
+            description = await Context.LanguageModelClient.GenerateCompletionAsync(prompt);
         }
         return description?.Response ?? $"{method} {parametrizedPath}";
     }
@@ -578,7 +610,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
     private void SetParametersFromQueryString(OpenApiOperation operation, NameValueCollection queryParams)
     {
         if (queryParams.AllKeys is null ||
-            !queryParams.AllKeys.Any())
+            queryParams.AllKeys.Length == 0)
         {
             Logger.LogDebug("  Request has no query string parameters");
             return;
@@ -669,7 +701,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         operation.Responses.Add(responseCode, openApiResponse);
     }
 
-    private string GetMediaType(string? contentType)
+    private static string GetMediaType(string? contentType)
     {
         if (string.IsNullOrEmpty(contentType))
         {
@@ -714,11 +746,11 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
                     Title = $"{serverUrl} API",
                     Description = $"{serverUrl} API",
                 },
-                Servers = new List<OpenApiServer>
-                {
+                Servers =
+                [
                     new OpenApiServer { Url = serverUrl }
-                },
-                Paths = new OpenApiPaths(),
+                ],
+                Paths = [],
                 Extensions = new Dictionary<string, IOpenApiExtension>
                 {
                     { "x-ms-generated-by", new GeneratedByOpenApiExtension() }
@@ -731,24 +763,23 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
             Logger.LogDebug("  Found OpenAPI spec for {serverUrl}...", serverUrl);
         }
 
-        if (!openApiDoc.Paths.ContainsKey(parametrizedPath))
+        if (!openApiDoc.Paths.TryGetValue(parametrizedPath, out OpenApiPathItem? value))
         {
             Logger.LogDebug("  Adding path {parametrizedPath} to OpenAPI spec...", parametrizedPath);
-
-            openApiDoc.Paths.Add(parametrizedPath, pathItem);
+            value = pathItem;
+            openApiDoc.Paths.Add(parametrizedPath, value);
             // since we've just added the path, we're done
             return;
         }
 
         Logger.LogDebug("  Merging path {parametrizedPath} into OpenAPI spec...", parametrizedPath);
-        var path = openApiDoc.Paths[parametrizedPath];
         var operation = pathItem.Operations.First();
-        AddOrMergeOperation(path, operation.Key, operation.Value);
+        AddOrMergeOperation(value, operation.Key, operation.Value);
     }
 
     private void AddOrMergeOperation(OpenApiPathItem pathItem, OperationType operationType, OpenApiOperation apiOperation)
     {
-        if (!pathItem.Operations.ContainsKey(operationType))
+        if (!pathItem.Operations.TryGetValue(operationType, out OpenApiOperation? value))
         {
             Logger.LogDebug("    Adding operation {operationType} to path...", operationType);
 
@@ -759,7 +790,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
 
         Logger.LogDebug("    Merging operation {operationType} into path...", operationType);
 
-        var operation = pathItem.Operations[operationType];
+        var operation = value;
 
         AddOrMergeParameters(operation, apiOperation.Parameters);
         AddOrMergeRequestBody(operation, apiOperation.RequestBody);
@@ -847,8 +878,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         }
 
         var requestBodyType = requestBody.Content.FirstOrDefault().Key;
-        var bodyFromOperation = operation.RequestBody.Content.ContainsKey(requestBodyType) ?
-          operation.RequestBody.Content[requestBodyType] : null;
+        operation.RequestBody.Content.TryGetValue(requestBodyType, out OpenApiMediaType? bodyFromOperation);
 
         if (bodyFromOperation is null)
         {
@@ -874,8 +904,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         var apiResponseInfo = apiResponses.FirstOrDefault();
         var apiResponseStatusCode = apiResponseInfo.Key;
         var apiResponse = apiResponseInfo.Value;
-        var responseFromOperation = operation.Responses.ContainsKey(apiResponseStatusCode) ?
-          operation.Responses[apiResponseStatusCode] : null;
+        operation.Responses.TryGetValue(apiResponseStatusCode, out OpenApiResponse? responseFromOperation);
 
         if (responseFromOperation is null)
         {
@@ -893,8 +922,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         }
 
         var apiResponseContentType = apiResponse.Content.First().Key;
-        var contentFromOperation = responseFromOperation.Content.ContainsKey(apiResponseContentType) ?
-          responseFromOperation.Content[apiResponseContentType] : null;
+        responseFromOperation.Content.TryGetValue(apiResponseContentType, out OpenApiMediaType? contentFromOperation);
 
         if (contentFromOperation is null)
         {
@@ -909,14 +937,20 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         MergeSchema(contentFromOperation.Schema, apiResponse.Content.First().Value.Schema);
     }
 
-    private string GetFileNameFromServerUrl(string serverUrl)
+    private static string GetFileNameFromServerUrl(string serverUrl, SpecFormat format)
     {
         var uri = new Uri(serverUrl);
-        var fileName = $"{uri.Host}-{DateTime.Now:yyyyMMddHHmmss}.json";
+        var ext = format switch
+        {
+            SpecFormat.Json => "json",
+            SpecFormat.Yaml => "yaml",
+            _ => "json"
+        };
+        var fileName = $"{uri.Host}-{DateTime.Now:yyyyMMddHHmmss}.{ext}";
         return fileName;
     }
 
-    private OpenApiSchema GetSchemaFromJsonString(string jsonString)
+    private static OpenApiSchema GetSchemaFromJsonString(string jsonString)
     {
         try
         {
@@ -934,7 +968,7 @@ public class OpenApiSpecGeneratorPlugin : BaseReportingPlugin
         }
     }
 
-    private OpenApiSchema GetSchemaFromJsonElement(JsonElement jsonElement)
+    private static OpenApiSchema GetSchemaFromJsonElement(JsonElement jsonElement)
     {
         var schema = new OpenApiSchema();
 
