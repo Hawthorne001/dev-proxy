@@ -1,60 +1,58 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Net;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
+using DevProxy.Abstractions.LanguageModel;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Titanium.Web.Proxy.Models;
 
-public class OpenAIMockResponsePlugin : BaseProxyPlugin
-{
-    public OpenAIMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
+namespace DevProxy.Plugins.Mocks;
 
+public class OpenAIMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
+{
     public override string Name => nameof(OpenAIMockResponsePlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         using var scope = Logger.BeginScope(Name);
 
         Logger.LogInformation("Checking language model availability...");
-        if (!Context.LanguageModelClient.IsEnabled().Result)
+        if (!await Context.LanguageModelClient.IsEnabledAsync())
         {
             Logger.LogError("Local language model is not enabled. The {plugin} will not be used.", Name);
             return;
         }
 
-        PluginEvents.BeforeRequest += OnRequest;
+        PluginEvents.BeforeRequest += OnRequestAsync;
     }
 
-    private async Task OnRequest(object sender, ProxyRequestArgs e)
+    private async Task OnRequestAsync(object sender, ProxyRequestArgs e)
     {
-        using var scope = Logger.BeginScope(Name);
-
         var request = e.Session.HttpClient.Request;
         if (request.Method is null ||
             !request.Method.Equals("POST", StringComparison.OrdinalIgnoreCase) ||
             !request.HasBody)
         {
+            Logger.LogRequest("Request is not a POST request with a body", MessageType.Skipped, new LoggingContext(e.Session));
             return;
         }
 
         if (!TryGetOpenAIRequest(request.BodyString, out var openAiRequest))
         {
+            Logger.LogRequest("Skipping non-OpenAI request", MessageType.Skipped, new LoggingContext(e.Session));
             return;
         }
 
         if (openAiRequest is OpenAICompletionRequest completionRequest)
         {
-            var ollamaResponse = (await Context.LanguageModelClient.GenerateCompletion(completionRequest.Prompt))
-                as OllamaLanguageModelCompletionResponse;
-            if (ollamaResponse is null)
+            if ((await Context.LanguageModelClient.GenerateCompletionAsync(completionRequest.Prompt)) is not OllamaLanguageModelCompletionResponse ollamaResponse)
             {
                 return;
             }
@@ -69,10 +67,8 @@ public class OpenAIMockResponsePlugin : BaseProxyPlugin
         }
         else if (openAiRequest is OpenAIChatCompletionRequest chatRequest)
         {
-            var ollamaResponse = (await Context.LanguageModelClient
-                .GenerateChatCompletion(chatRequest.Messages.ConvertToLanguageModelChatCompletionMessage()))
-                as OllamaLanguageModelChatCompletionResponse;
-            if (ollamaResponse is null)
+            if ((await Context.LanguageModelClient
+                .GenerateChatCompletionAsync(chatRequest.Messages.ConvertToLanguageModelChatCompletionMessage())) is not OllamaLanguageModelChatCompletionResponse ollamaResponse)
             {
                 return;
             }
@@ -142,7 +138,7 @@ public class OpenAIMockResponsePlugin : BaseProxyPlugin
             ]
         );
         e.ResponseState.HasBeenSet = true;
-        Logger.LogRequest([$"200 {localLmUrl}"], MessageType.Mocked, new LoggingContext(e.Session));
+        Logger.LogRequest($"200 {localLmUrl}", MessageType.Mocked, new LoggingContext(e.Session));
     }
 }
 

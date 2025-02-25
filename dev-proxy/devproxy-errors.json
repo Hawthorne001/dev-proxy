@@ -1,9 +1,9 @@
 {
-  "$schema": "https://raw.githubusercontent.com/microsoft/dev-proxy/main/schemas/v0.20.0/genericrandomerrorplugin.schema.json",
+  "$schema": "https://raw.githubusercontent.com/dotnet/dev-proxy/main/schemas/v0.25.0/genericrandomerrorplugin.errorsfile.schema.json",
   "errors": [
     {
       "request": {
-        "url": "https://jsonplaceholder.typicode.com/*"
+        "url": "https://*/*"
       },
       "responses": [
         {

@@ -1,38 +1,28 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.Extensions.Configuration;
-using Microsoft.Extensions.Logging;
+using DevProxy.Abstractions;
 using System.Reflection;
 using System.Text.RegularExpressions;
 
-namespace Microsoft.DevProxy;
+namespace DevProxy;
 
-internal class PluginLoaderResult
+internal class PluginLoaderResult(ISet<UrlToWatch> urlsToWatch, IEnumerable<IProxyPlugin> proxyPlugins)
 {
-    public ISet<UrlToWatch> UrlsToWatch { get; }
-    public IEnumerable<IProxyPlugin> ProxyPlugins { get; }
-    public PluginLoaderResult(ISet<UrlToWatch> urlsToWatch, IEnumerable<IProxyPlugin> proxyPlugins)
-    {
-        UrlsToWatch = urlsToWatch ?? throw new ArgumentNullException(nameof(urlsToWatch));
-        ProxyPlugins = proxyPlugins ?? throw new ArgumentNullException(nameof(proxyPlugins));
-    }
+    public ISet<UrlToWatch> UrlsToWatch { get; } = urlsToWatch ?? throw new ArgumentNullException(nameof(urlsToWatch));
+    public IEnumerable<IProxyPlugin> ProxyPlugins { get; } = proxyPlugins ?? throw new ArgumentNullException(nameof(proxyPlugins));
 }
 
-internal class PluginLoader
+internal class PluginLoader(ILogger logger, ILoggerFactory loggerFactory)
 {
     private PluginConfig? _pluginConfig;
-    private ILogger _logger;
+    private readonly ILogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    private readonly ILoggerFactory _loggerFactory = loggerFactory ?? throw new ArgumentNullException(nameof(loggerFactory));
 
-    public PluginLoader(ILogger logger)
+    public async Task<PluginLoaderResult> LoadPluginsAsync(IPluginEvents pluginEvents, IProxyContext proxyContext)
     {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-    }
-
-    public PluginLoaderResult LoadPlugins(IPluginEvents pluginEvents, IProxyContext proxyContext)
-    {
-        List<IProxyPlugin> plugins = new();
+        List<IProxyPlugin> plugins = [];
         var config = PluginConfig;
         var globallyWatchedUrls = PluginConfig.UrlsToWatch.Select(ConvertToRegex).ToList();
         var defaultUrlsToWatch = globallyWatchedUrls.ToHashSet();
@@ -74,7 +64,7 @@ internal class PluginLoader
                     h.ConfigSection is null ? null : Configuration.GetSection(h.ConfigSection)
                 );
                 _logger?.LogDebug("Registering plugin {pluginName}...", plugin.Name);
-                plugin.Register();
+                await plugin.RegisterAsync();
                 _logger?.LogDebug("Plugin {pluginName} registered.", plugin.Name);
                 plugins.Add(plugin);
             }
@@ -99,7 +89,8 @@ internal class PluginLoader
             if (type.Name == pluginReference.Name &&
                 typeof(IProxyPlugin).IsAssignableFrom(type))
             {
-                IProxyPlugin? result = Activator.CreateInstance(type, [pluginEvents, context, _logger, urlsToWatch, configSection]) as IProxyPlugin;
+                var logger = _loggerFactory.CreateLogger(type.Name);
+                IProxyPlugin? result = Activator.CreateInstance(type, [pluginEvents, context, logger, urlsToWatch, configSection]) as IProxyPlugin;
                 if (result is not null && result.Name == pluginReference.Name)
                 {
                     return result;
@@ -116,10 +107,10 @@ internal class PluginLoader
     public static UrlToWatch ConvertToRegex(string stringMatcher)
     {
         var exclude = false;
-        if (stringMatcher.StartsWith("!"))
+        if (stringMatcher.StartsWith('!'))
         {
             exclude = true;
-            stringMatcher = stringMatcher.Substring(1);
+            stringMatcher = stringMatcher[1..];
         }
 
         return new UrlToWatch(
@@ -142,7 +133,7 @@ internal class PluginLoader
                     _pluginConfig.UrlsToWatch = ProxyHost.UrlsToWatch.ToList();
                 }
             }
-            if (_pluginConfig == null || !_pluginConfig.Plugins.Any())
+            if (_pluginConfig == null || _pluginConfig.Plugins.Count == 0)
             {
                 throw new InvalidDataException("The configuration must contain at least one plugin");
             }
@@ -161,8 +152,8 @@ internal class PluginLoader
 
 internal class PluginConfig
 {
-    public List<PluginReference> Plugins { get; set; } = new();
-    public List<string> UrlsToWatch { get; set; } = new();
+    public List<PluginReference> Plugins { get; set; } = [];
+    public List<string> UrlsToWatch { get; set; } = [];
 }
 
 internal class PluginReference

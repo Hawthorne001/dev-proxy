@@ -1,15 +1,16 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Serialization;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
 public class MockRequestConfiguration
 {
@@ -18,25 +19,21 @@ public class MockRequestConfiguration
     public MockRequest? Request { get; set; }
 }
 
-public class MockRequestPlugin : BaseProxyPlugin
+public class MockRequestPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     protected MockRequestConfiguration _configuration = new();
     private MockRequestLoader? _loader = null;
 
-    public MockRequestPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(MockRequestPlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         ConfigSection?.Bind(_configuration);
         _loader = new MockRequestLoader(Logger, _configuration);
 
-        PluginEvents.MockRequest += OnMockRequest;
+        PluginEvents.MockRequest += OnMockRequestAsync;
 
         // make the mock file path relative to the configuration file
         _configuration.MockFile = Path.GetFullPath(ProxyUtils.ReplacePathTokens(_configuration.MockFile), Path.GetDirectoryName(Context.Configuration.ConfigFile ?? string.Empty) ?? string.Empty);
@@ -63,7 +60,7 @@ public class MockRequestPlugin : BaseProxyPlugin
 
             foreach (var header in _configuration.Request.Headers)
             {
-                if (header.Name.ToLower() == "content-type")
+                if (header.Name.Equals("content-type", StringComparison.CurrentCultureIgnoreCase))
                 {
                     contentType = header.Value;
                     continue;
@@ -90,7 +87,7 @@ public class MockRequestPlugin : BaseProxyPlugin
         return requestMessage;
     }
 
-    protected virtual async Task OnMockRequest(object sender, EventArgs e)
+    protected virtual async Task OnMockRequestAsync(object sender, EventArgs e)
     {
         if (_configuration.Request is null)
         {
@@ -103,7 +100,7 @@ public class MockRequestPlugin : BaseProxyPlugin
 
         try
         {
-            Logger.LogRequest(["Sending mock request"], MessageType.Mocked, _configuration.Request.Method, _configuration.Request.Url);
+            Logger.LogRequest("Sending mock request", MessageType.Mocked, _configuration.Request.Method, _configuration.Request.Url);
 
             await httpClient.SendAsync(requestMessage);
         }

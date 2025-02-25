@@ -1,38 +1,35 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Text.Json;
 using Microsoft.Extensions.Configuration;
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.DevProxy.Plugins.Mocks;
+using DevProxy.Abstractions;
+using DevProxy.Plugins.Mocks;
 using Titanium.Web.Proxy.EventArguments;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.RequestLogs;
+namespace DevProxy.Plugins.RequestLogs;
 
-public class MockGeneratorPlugin : BaseReportingPlugin
+public class MockGeneratorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseReportingPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
-    public MockGeneratorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(MockGeneratorPlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
-        PluginEvents.AfterRecordingStop += AfterRecordingStop;
+        PluginEvents.AfterRecordingStop += AfterRecordingStopAsync;
     }
 
-    private Task AfterRecordingStop(object? sender, RecordingArgs e)
+    private async Task AfterRecordingStopAsync(object? sender, RecordingArgs e)
     {
         Logger.LogInformation("Creating mocks from recorded requests...");
 
         if (!e.RequestLogs.Any())
         {
             Logger.LogDebug("No requests to process");
-            return Task.CompletedTask;
+            return;
         }
 
         var methodAndUrlComparer = new MethodAndUrlComparer();
@@ -47,7 +44,7 @@ public class MockGeneratorPlugin : BaseReportingPlugin
                 continue;
             }
 
-            var methodAndUrlString = request.MessageLines.First();
+            var methodAndUrlString = request.Message;
             Logger.LogDebug("Processing request {methodAndUrlString}...", methodAndUrlString);
 
             var (method, url) = GetMethodAndUrl(methodAndUrlString);
@@ -66,7 +63,7 @@ public class MockGeneratorPlugin : BaseReportingPlugin
                 {
                     StatusCode = response.StatusCode,
                     Headers = newHeaders,
-                    Body = GetResponseBody(request.Context.Session).Result
+                    Body = await GetResponseBodyAsync(request.Context.Session)
                 }
             };
             // skip mock if it's 200 but has no body
@@ -96,8 +93,6 @@ public class MockGeneratorPlugin : BaseReportingPlugin
         Logger.LogInformation("Created mock file {fileName} with {mocksCount} mocks", fileName, mocks.Count);
 
         StoreReport(fileName, e);
-
-        return Task.CompletedTask;
     }
 
     /// <summary>
@@ -106,7 +101,7 @@ public class MockGeneratorPlugin : BaseReportingPlugin
     /// </summary>
     /// <param name="session">Request session</param>
     /// <returns>Response body or @filename for binary responses</returns>
-    private async Task<dynamic?> GetResponseBody(SessionEventArgs session)
+    private async Task<dynamic?> GetResponseBodyAsync(SessionEventArgs session)
     {
         Logger.LogDebug("Getting response body...");
 
@@ -154,7 +149,7 @@ public class MockGeneratorPlugin : BaseReportingPlugin
         }
     }
 
-    private (string method, string url) GetMethodAndUrl(string message)
+    private static (string method, string url) GetMethodAndUrl(string message)
     {
         var info = message.Split(" ");
         if (info.Length > 2)
