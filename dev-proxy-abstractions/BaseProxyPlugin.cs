@@ -1,11 +1,12 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.CommandLine;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Abstractions;
+namespace DevProxy.Abstractions;
 
 public abstract class BaseProxyPlugin : IProxyPlugin
 {
@@ -17,8 +18,8 @@ public abstract class BaseProxyPlugin : IProxyPlugin
 
     public virtual string Name => throw new NotImplementedException();
 
-    public virtual Option[] GetOptions() => Array.Empty<Option>();
-    public virtual Command[] GetCommands() => Array.Empty<Command>();
+    public virtual Option[] GetOptions() => [];
+    public virtual Command[] GetCommands() => [];
 
     public BaseProxyPlugin(IPluginEvents pluginEvents,
                          IProxyContext context,
@@ -26,20 +27,9 @@ public abstract class BaseProxyPlugin : IProxyPlugin
                          ISet<UrlToWatch> urlsToWatch,
                          IConfigurationSection? configSection = null)
     {
-        if (pluginEvents is null)
-        {
-            throw new ArgumentNullException(nameof(pluginEvents));
-        }
-
-        if (context is null)
-        {
-            throw new ArgumentNullException(nameof(context));
-        }
-
-        if (logger is null)
-        {
-            throw new ArgumentNullException(nameof(logger));
-        }
+        ArgumentNullException.ThrowIfNull(pluginEvents);
+        ArgumentNullException.ThrowIfNull(context);
+        ArgumentNullException.ThrowIfNull(logger);
 
         if (urlsToWatch is null || !urlsToWatch.Any())
         {
@@ -53,7 +43,8 @@ public abstract class BaseProxyPlugin : IProxyPlugin
         PluginEvents = pluginEvents;
     }
 
-    public virtual void Register()
+    public virtual Task RegisterAsync()
     {
+        return Task.CompletedTask;
     }
 }

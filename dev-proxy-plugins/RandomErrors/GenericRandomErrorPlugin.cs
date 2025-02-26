@@ -1,18 +1,21 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Configuration;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using System.Net;
 using System.Text.Json;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Http;
 using Titanium.Web.Proxy.Models;
-using Microsoft.DevProxy.Plugins.Behavior;
+using DevProxy.Plugins.Behavior;
 using Microsoft.Extensions.Logging;
 using System.Text.RegularExpressions;
+using System.CommandLine.Invocation;
+using System.CommandLine;
 
-namespace Microsoft.DevProxy.Plugins.RandomErrors;
+namespace DevProxy.Plugins.RandomErrors;
 internal enum GenericRandomErrorFailMode
 {
     Throttled,
@@ -23,12 +26,15 @@ internal enum GenericRandomErrorFailMode
 public class GenericRandomErrorConfiguration
 {
     public string? ErrorsFile { get; set; }
+    public int Rate { get; set; } = 50;
     public int RetryAfterInSeconds { get; set; } = 5;
-    public IEnumerable<GenericErrorResponse> Errors { get; set; } = Array.Empty<GenericErrorResponse>();
+    public IEnumerable<GenericErrorResponse> Errors { get; set; } = [];
 }
 
-public class GenericRandomErrorPlugin : BaseProxyPlugin
+public class GenericRandomErrorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
+    private static readonly string _rateOptionName = "--failure-rate";
+
     private readonly GenericRandomErrorConfiguration _configuration = new();
     private GenericErrorResponsesLoader? _loader = null;
 
@@ -36,13 +42,8 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
 
     private readonly Random _random = new();
 
-    public GenericRandomErrorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-        _random = new Random();
-    }
-
     // uses config to determine if a request should be failed
-    private GenericRandomErrorFailMode ShouldFail(ProxyRequestArgs e) => _random.Next(1, 100) <= Context.Configuration.Rate ? GenericRandomErrorFailMode.Random : GenericRandomErrorFailMode.PassThru;
+    private GenericRandomErrorFailMode ShouldFail() => _random.Next(1, 100) <= _configuration.Rate ? GenericRandomErrorFailMode.Random : GenericRandomErrorFailMode.PassThru;
 
     private void FailResponse(ProxyRequestArgs e)
     {
@@ -53,6 +54,10 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
             // pick a random error response for the current request
             var error = matchingResponse.Responses.ElementAt(_random.Next(0, matchingResponse.Responses.Length));
             UpdateProxyResponse(e, error);
+        }
+        else
+        {
+            Logger.LogRequest("No matching error response found", MessageType.Skipped, new LoggingContext(e.Session));
         }
     }
 
@@ -98,7 +103,7 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
         return errorResponse;
     }
 
-    private bool HasMatchingBody(GenericErrorResponse errorResponse, Request request)
+    private static bool HasMatchingBody(GenericErrorResponse errorResponse, Request request)
     {
         if (request.Method == "GET")
         {
@@ -176,15 +181,15 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
             session.GenericResponse(body, statusCode, headers.Select(h => new HttpHeader(h.Name, h.Value)));
         }
         e.ResponseState.HasBeenSet = true;
-        Logger.LogRequest([$"{error.StatusCode} {statusCode.ToString()}"], MessageType.Chaos, new LoggingContext(e.Session));
+        Logger.LogRequest($"{error.StatusCode} {statusCode}", MessageType.Chaos, new LoggingContext(e.Session));
     }
 
     // throttle requests per host
-    private string BuildThrottleKey(Request r) => r.RequestUri.Host;
+    private static string BuildThrottleKey(Request r) => r.RequestUri.Host;
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         ConfigSection?.Bind(_configuration);
         _configuration.ErrorsFile = Path.GetFullPath(ProxyUtils.ReplacePathTokens(_configuration.ErrorsFile ?? string.Empty), Path.GetDirectoryName(Context.Configuration.ConfigFile ?? string.Empty) ?? string.Empty);
@@ -192,7 +197,41 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
         _loader = new GenericErrorResponsesLoader(Logger, _configuration);
 
         PluginEvents.Init += OnInit;
-        PluginEvents.BeforeRequest += OnRequest;
+        PluginEvents.OptionsLoaded += OnOptionsLoaded;
+        PluginEvents.BeforeRequest += OnRequestAsync;
+    }
+
+    public override Option[] GetOptions()
+    {
+        var _rateOption = new Option<int?>(_rateOptionName, "The percentage of chance that a request will fail");
+        _rateOption.AddAlias("-f");
+        _rateOption.ArgumentHelpName = "failure rate";
+        _rateOption.AddValidator((input) =>
+        {
+            try
+            {
+                int? value = input.GetValueForOption(_rateOption);
+                if (value.HasValue && (value < 0 || value > 100))
+                {
+                    input.ErrorMessage = $"{value} is not a valid failure rate. Specify a number between 0 and 100";
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                input.ErrorMessage = ex.Message;
+            }
+        });
+
+        return [_rateOption];
+    }
+
+    private void OnOptionsLoaded(object? sender, OptionsLoadedArgs e)
+    {
+        InvocationContext context = e.Context;
+
+        var rate = context.ParseResult.GetValueForOption<int?>(_rateOptionName, e.Options);
+        if (rate is not null)
+            _configuration.Rate = rate.Value;
     }
 
     private void OnInit(object? sender, InitArgs e)
@@ -200,20 +239,28 @@ public class GenericRandomErrorPlugin : BaseProxyPlugin
         _loader?.InitResponsesWatcher();
     }
 
-    private Task OnRequest(object? sender, ProxyRequestArgs e)
+    private Task OnRequestAsync(object? sender, ProxyRequestArgs e)
     {
-        if (!e.ResponseState.HasBeenSet
-            && UrlsToWatch is not null
-            && e.ShouldExecute(UrlsToWatch))
+        if (e.ResponseState.HasBeenSet)
         {
-            var failMode = ShouldFail(e);
-
-            if (failMode == GenericRandomErrorFailMode.PassThru && Context.Configuration?.Rate != 100)
-            {
-                return Task.CompletedTask;
-            }
-            FailResponse(e);
+            Logger.LogRequest("Response already set", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
         }
+        if (UrlsToWatch is null ||
+            !e.ShouldExecute(UrlsToWatch))
+        {
+            Logger.LogRequest("URL not matched", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
+        }
+
+        var failMode = ShouldFail();
+
+        if (failMode == GenericRandomErrorFailMode.PassThru && _configuration.Rate != 100)
+        {
+            Logger.LogRequest("Pass through", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
+        }
+        FailResponse(e);
 
         return Task.CompletedTask;
     }
