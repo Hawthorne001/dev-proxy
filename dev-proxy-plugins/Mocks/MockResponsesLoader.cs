@@ -1,41 +1,24 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Microsoft.Extensions.Logging;
 using System.Text.Json;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
-internal class MockResponsesLoader : IDisposable
+internal class MockResponsesLoader(ILogger logger, MockResponseConfiguration configuration, bool validateSchemas) : BaseLoader(logger, validateSchemas)
 {
-    private readonly ILogger _logger;
-    private readonly MockResponseConfiguration _configuration;
+    private readonly ILogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    private readonly MockResponseConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+    protected override string FilePath => Path.Combine(Directory.GetCurrentDirectory(), _configuration.MocksFile);
 
-    public MockResponsesLoader(ILogger logger, MockResponseConfiguration configuration)
+    protected override void LoadData(string fileContents)
     {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-    }
-
-    private string _responsesFilePath => Path.Combine(Directory.GetCurrentDirectory(), _configuration.MocksFile);
-    private FileSystemWatcher? _watcher;
-
-    public void LoadResponses()
-    {
-        if (!File.Exists(_responsesFilePath))
-        {
-            _logger.LogWarning("File {configurationFile} not found. No mocks will be provided", _configuration.MocksFile);
-            _configuration.Mocks = Array.Empty<MockResponse>();
-            return;
-        }
-
         try
         {
-            using var stream = new FileStream(_responsesFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(stream);
-            var responsesString = reader.ReadToEnd();
-            var responsesConfig = JsonSerializer.Deserialize<MockResponseConfiguration>(responsesString, ProxyUtils.JsonSerializerOptions);
+            var responsesConfig = JsonSerializer.Deserialize<MockResponseConfiguration>(fileContents, ProxyUtils.JsonSerializerOptions);
             IEnumerable<MockResponse>? configResponses = responsesConfig?.Mocks;
             if (configResponses is not null)
             {
@@ -47,45 +30,5 @@ internal class MockResponsesLoader : IDisposable
         {
             _logger.LogError(ex, "An error has occurred while reading {configurationFile}:", _configuration.MocksFile);
         }
-    }
-
-    public void InitResponsesWatcher()
-    {
-        if (_watcher is not null)
-        {
-            return;
-        }
-
-        string path = Path.GetDirectoryName(_responsesFilePath) ?? throw new InvalidOperationException($"{_responsesFilePath} is an invalid path");
-        if (!File.Exists(_responsesFilePath))
-        {
-            _logger.LogWarning("File {configurationFile} not found. No mocks will be provided", _configuration.MocksFile);
-            _configuration.Mocks = Array.Empty<MockResponse>();
-            return;
-        }
-
-        _watcher = new FileSystemWatcher(Path.GetFullPath(path));
-        _watcher.NotifyFilter = NotifyFilters.CreationTime
-                             | NotifyFilters.FileName
-                             | NotifyFilters.LastWrite
-                             | NotifyFilters.Size;
-        _watcher.Filter = Path.GetFileName(_responsesFilePath);
-        _watcher.Changed += ResponsesFile_Changed;
-        _watcher.Created += ResponsesFile_Changed;
-        _watcher.Deleted += ResponsesFile_Changed;
-        _watcher.Renamed += ResponsesFile_Changed;
-        _watcher.EnableRaisingEvents = true;
-
-        LoadResponses();
-    }
-
-    private void ResponsesFile_Changed(object sender, FileSystemEventArgs e)
-    {
-        LoadResponses();
-    }
-
-    public void Dispose()
-    {
-        _watcher?.Dispose();
     }
 }

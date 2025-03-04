@@ -1,9 +1,10 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using System.CommandLine;
 using System.CommandLine.Invocation;
 using System.Net;
@@ -12,9 +13,9 @@ using System.Text.RegularExpressions;
 using Titanium.Web.Proxy.EventArguments;
 using Titanium.Web.Proxy.Http;
 using Titanium.Web.Proxy.Models;
-using Microsoft.DevProxy.Plugins.Behavior;
+using DevProxy.Plugins.Behavior;
 
-namespace Microsoft.DevProxy.Plugins.RandomErrors;
+namespace DevProxy.Plugins.RandomErrors;
 internal enum GraphRandomErrorFailMode
 {
     Random,
@@ -23,13 +24,16 @@ internal enum GraphRandomErrorFailMode
 
 public class GraphRandomErrorConfiguration
 {
-    public List<int> AllowedErrors { get; set; } = new();
+    public List<int> AllowedErrors { get; set; } = [];
+    public int Rate { get; set; } = 50;
     public int RetryAfterInSeconds { get; set; } = 5;
 }
 
-public class GraphRandomErrorPlugin : BaseProxyPlugin
+public class GraphRandomErrorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     private static readonly string _allowedErrorsOptionName = "--allowed-errors";
+    private static readonly string _rateOptionName = "--failure-rate";
+
     private readonly GraphRandomErrorConfiguration _configuration = new();
 
     public override string Name => nameof(GraphRandomErrorPlugin);
@@ -87,12 +91,8 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
     };
     private readonly Random _random = new();
 
-    public GraphRandomErrorPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     // uses config to determine if a request should be failed
-    private GraphRandomErrorFailMode ShouldFail(ProxyRequestArgs e) => _random.Next(1, 100) <= Context.Configuration.Rate ? GraphRandomErrorFailMode.Random : GraphRandomErrorFailMode.PassThru;
+    private GraphRandomErrorFailMode ShouldFail(ProxyRequestArgs e) => _random.Next(1, 100) <= _configuration.Rate ? GraphRandomErrorFailMode.Random : GraphRandomErrorFailMode.PassThru;
 
     private void FailResponse(ProxyRequestArgs e)
     {
@@ -149,7 +149,7 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
             }
             catch { }
         }
-        batchResponse.Responses = responses.ToArray();
+        batchResponse.Responses = [.. responses];
 
         UpdateProxyBatchResponse(e, batchResponse);
     }
@@ -170,12 +170,13 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
         if (errorStatus == HttpStatusCode.TooManyRequests)
         {
             var retryAfterDate = DateTime.Now.AddSeconds(_configuration.RetryAfterInSeconds);
-            if (!e.GlobalData.ContainsKey(RetryAfterPlugin.ThrottledRequestsKey))
+            if (!e.GlobalData.TryGetValue(RetryAfterPlugin.ThrottledRequestsKey, out object? value))
             {
-                e.GlobalData.Add(RetryAfterPlugin.ThrottledRequestsKey, new List<ThrottlerInfo>());
+                value = new List<ThrottlerInfo>();
+                e.GlobalData.Add(RetryAfterPlugin.ThrottledRequestsKey, value);
             }
 
-            var throttledRequests = e.GlobalData[RetryAfterPlugin.ThrottledRequestsKey] as List<ThrottlerInfo>;
+            var throttledRequests = value as List<ThrottlerInfo>;
             throttledRequests?.Add(new ThrottlerInfo(GraphUtils.BuildThrottleKey(request), ShouldThrottle, retryAfterDate));
             headers.Add(new("Retry-After", _configuration.RetryAfterInSeconds.ToString()));
         }
@@ -193,7 +194,7 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
             }),
             ProxyUtils.JsonSerializerOptions
         );
-        Logger.LogRequest(new[] { $"{(int)errorStatus} {errorStatus.ToString()}" }, MessageType.Chaos, new LoggingContext(e.Session));
+        Logger.LogRequest($"{(int)errorStatus} {errorStatus}", MessageType.Chaos, new LoggingContext(e.Session));
         session.GenericResponse(body ?? string.Empty, errorStatus, headers.Select(h => new HttpHeader(h.Name, h.Value)));
     }
 
@@ -209,7 +210,7 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
         var headers = ProxyUtils.BuildGraphResponseHeaders(request, requestId, requestDate);
 
         string body = JsonSerializer.Serialize(response, ProxyUtils.JsonSerializerOptions);
-        Logger.LogRequest(new[] { $"{(int)errorStatus} {errorStatus.ToString()}" }, MessageType.Chaos, new LoggingContext(ev.Session));
+        Logger.LogRequest($"{(int)errorStatus} {errorStatus}", MessageType.Chaos, new LoggingContext(ev.Session));
         session.GenericResponse(body, errorStatus, headers.Select(h => new HttpHeader(h.Name, h.Value)));
     }
 
@@ -224,16 +225,35 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
         };
         _allowedErrors.AddAlias("-a");
 
-        return [_allowedErrors];
+        var _rateOption = new Option<int?>(_rateOptionName, "The percentage of chance that a request will fail");
+        _rateOption.AddAlias("-f");
+        _rateOption.ArgumentHelpName = "failure rate";
+        _rateOption.AddValidator((input) =>
+        {
+            try
+            {
+                int? value = input.GetValueForOption(_rateOption);
+                if (value.HasValue && (value < 0 || value > 100))
+                {
+                    input.ErrorMessage = $"{value} is not a valid failure rate. Specify a number between 0 and 100";
+                }
+            }
+            catch (InvalidOperationException ex)
+            {
+                input.ErrorMessage = ex.Message;
+            }
+        });
+
+        return [_allowedErrors, _rateOption];
     }
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
         ConfigSection?.Bind(_configuration);
         PluginEvents.OptionsLoaded += OnOptionsLoaded;
-        PluginEvents.BeforeRequest += OnRequest;
+        PluginEvents.BeforeRequest += OnRequestAsync;
     }
 
     private void OnOptionsLoaded(object? sender, OptionsLoadedArgs e)
@@ -245,38 +265,49 @@ public class GraphRandomErrorPlugin : BaseProxyPlugin
         if (allowedErrors?.Any() ?? false)
             _configuration.AllowedErrors = allowedErrors.ToList();
 
-        if (_configuration.AllowedErrors.Any())
+        if (_configuration.AllowedErrors.Count != 0)
         {
             foreach (string k in _methodStatusCode.Keys)
             {
                 _methodStatusCode[k] = _methodStatusCode[k].Where(e => _configuration.AllowedErrors.Any(a => (int)e == a)).ToArray();
             }
         }
+
+        var rate = context.ParseResult.GetValueForOption<int?>(_rateOptionName, e.Options);
+        if (rate is not null)
+            _configuration.Rate = rate.Value;
     }
 
-    private Task OnRequest(object? sender, ProxyRequestArgs e)
+    private Task OnRequestAsync(object? sender, ProxyRequestArgs e)
     {
         var state = e.ResponseState;
-        if (!e.ResponseState.HasBeenSet
-            && UrlsToWatch is not null
-            && e.ShouldExecute(UrlsToWatch))
+        if (state.HasBeenSet)
         {
-            var failMode = ShouldFail(e);
-
-            if (failMode == GraphRandomErrorFailMode.PassThru && Context.Configuration.Rate != 100)
-            {
-                return Task.CompletedTask;
-            }
-            if (ProxyUtils.IsGraphBatchUrl(e.Session.HttpClient.Request.RequestUri))
-            {
-                FailBatch(e);
-            }
-            else
-            {
-                FailResponse(e);
-            }
-            state.HasBeenSet = true;
+            Logger.LogRequest("Response already set", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
         }
+        if (UrlsToWatch is null ||
+            !e.ShouldExecute(UrlsToWatch))
+        {
+            Logger.LogRequest("URL not matched", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
+        }
+
+        var failMode = ShouldFail(e);
+        if (failMode == GraphRandomErrorFailMode.PassThru && _configuration.Rate != 100)
+        {
+            Logger.LogRequest("Pass through", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
+        }
+        if (ProxyUtils.IsGraphBatchUrl(e.Session.HttpClient.Request.RequestUri))
+        {
+            FailBatch(e);
+        }
+        else
+        {
+            FailResponse(e);
+        }
+        state.HasBeenSet = true;
 
         return Task.CompletedTask;
     }

@@ -1,17 +1,18 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Text;
 using System.Text.Json;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.IdentityModel.Tokens;
 using Titanium.Web.Proxy.EventArguments;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
 public class GraphConnectorNotificationConfiguration : MockRequestConfiguration
 {
@@ -19,31 +20,28 @@ public class GraphConnectorNotificationConfiguration : MockRequestConfiguration
     public string? Tenant { get; set; }
 }
 
-public class GraphConnectorNotificationPlugin : MockRequestPlugin
+public class GraphConnectorNotificationPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : MockRequestPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     private string? _ticket = null;
-    private GraphConnectorNotificationConfiguration _graphConnectorConfiguration = new();
-
-    public GraphConnectorNotificationPlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
+    private readonly GraphConnectorNotificationConfiguration _graphConnectorConfiguration = new();
 
     public override string Name => nameof(GraphConnectorNotificationPlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
         ConfigSection?.Bind(_graphConnectorConfiguration);
         _graphConnectorConfiguration.MockFile = _configuration.MockFile;
         _graphConnectorConfiguration.Request = _configuration.Request;
         
-        PluginEvents.BeforeRequest += OnBeforeRequest;
+        PluginEvents.BeforeRequest += OnBeforeRequestAsync;
     }
 
-    private Task OnBeforeRequest(object sender, ProxyRequestArgs e)
+    private Task OnBeforeRequestAsync(object sender, ProxyRequestArgs e)
     {
         if (!ProxyUtils.IsGraphRequest(e.Session.HttpClient.Request))
         {
+            Logger.LogRequest("Request is not a Microsoft Graph request", MessageType.Skipped, new LoggingContext(e.Session));
             return Task.CompletedTask;
         }
 
@@ -55,6 +53,7 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
     {
         if (_ticket is null)
         {
+            Logger.LogRequest("No ticket found in the Graph request", MessageType.Skipped, new LoggingContext(session));
             return;
         }
 
@@ -62,6 +61,7 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
 
         if (request.Method != "POST" && request.Method != "DELETE")
         {
+            Logger.LogRequest("Skipping non-POST and -DELETE request", MessageType.Skipped, new LoggingContext(session));
             return;
         }
 
@@ -70,23 +70,28 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
             (request.Method == "DELETE" &&
             !request.RequestUri.AbsolutePath.Contains("/external/connections/", StringComparison.OrdinalIgnoreCase)))
         {
+            Logger.LogRequest("Skipping non-connection request", MessageType.Skipped, new LoggingContext(session));
             return;
         }
 
         var ticketFromHeader = request.Headers.FirstOrDefault(h => h.Name.Equals("GraphConnectors-Ticket", StringComparison.OrdinalIgnoreCase))?.Value;
         if (ticketFromHeader is null)
         {
-            Logger.LogRequest(["No ticket header found in the Graph connector notification"], MessageType.Failed, new LoggingContext(session));
+            Logger.LogRequest("No ticket header found in the Graph connector notification", MessageType.Failed, new LoggingContext(session));
             return;
         }
 
         if (ticketFromHeader != _ticket)
         {
-            Logger.LogRequest([$"Ticket on the request does not match the expected ticket. Expected: {_ticket}. Request: {ticketFromHeader}"], MessageType.Failed, new LoggingContext(session));
+            Logger.LogRequest($"Ticket on the request does not match the expected ticket. Expected: {_ticket}. Request: {ticketFromHeader}", MessageType.Failed, new LoggingContext(session));
+        }
+        else
+        {
+            Logger.LogRequest("Ticket verified", MessageType.Normal, new LoggingContext(session));
         }
     }
 
-    protected override async Task OnMockRequest(object sender, EventArgs e)
+    protected override async Task OnMockRequestAsync(object sender, EventArgs e)
     {
         if (_configuration.Request is null)
         {
@@ -108,13 +113,13 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
 
         try
         {
-            Logger.LogRequest(["Sending Graph connector notification"], MessageType.Mocked, _configuration.Request.Method, _configuration.Request.Url);
+            Logger.LogRequest("Sending Graph connector notification", MessageType.Mocked, _configuration.Request.Method, _configuration.Request.Url);
 
             var response = await httpClient.SendAsync(requestMessage);
 
             if (response.StatusCode != HttpStatusCode.Accepted)
             {
-                Logger.LogRequest([$"Incorrect response status code {(int)response.StatusCode} {response.StatusCode}. Expected: 202 Accepted"], MessageType.Failed, _configuration.Request.Method, _configuration.Request.Url);
+                Logger.LogRequest($"Incorrect response status code {(int)response.StatusCode} {response.StatusCode}. Expected: 202 Accepted", MessageType.Failed, _configuration.Request.Method, _configuration.Request.Url);
             }
 
             if (response.Content is not null)
@@ -122,7 +127,7 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
                 var content = await response.Content.ReadAsStringAsync();
                 if (!string.IsNullOrEmpty(content))
                 {
-                    Logger.LogRequest(["Received response body while empty response expected"], MessageType.Failed, _configuration.Request.Method, _configuration.Request.Url);
+                    Logger.LogRequest("Received response body while empty response expected", MessageType.Failed, _configuration.Request.Method, _configuration.Request.Url);
                 }
             }
         }
@@ -141,14 +146,16 @@ public class GraphConnectorNotificationPlugin : MockRequestPlugin
         {
             Claims = new Dictionary<string, object>
             {
-                { "scp", "user_impersonation" },
-                { "sub", "l3_roISQU222bULS9yi2k0XpqpOiMz5H3ZACo1GeXA" },
-                { "ver", "1.0" },
-                // Graph Connector Service
-                { "appid", "56c1da01-2129-48f7-9355-af6d59d42766" }
+                // Microsoft Graph Change Tracking
+                { "azp", "0bf30f3b-4a52-48df-9a82-234910c4a086" },
+                // client cert auth
+                { "azpacr", "2" },
+                { "tid", _graphConnectorConfiguration.Tenant ?? "" },
+                { "ver", "2.0" }
+                
             },
             Expires = DateTime.UtcNow.AddMinutes(60),
-            Issuer = $"https://sts.windows.net/{_graphConnectorConfiguration.Tenant}/",
+            Issuer = $"https://login.microsoftonline.com/{_graphConnectorConfiguration.Tenant}/v2.0",
             Audience = _graphConnectorConfiguration.Audience,
             SigningCredentials = signingCredentials
         };

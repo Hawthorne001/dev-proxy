@@ -1,13 +1,17 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
+using Microsoft.Extensions.Logging;
+using Newtonsoft.Json.Linq;
+using Newtonsoft.Json.Schema;
 using System.Reflection;
 using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using Titanium.Web.Proxy.Http;
 
-namespace Microsoft.DevProxy.Abstractions;
+namespace DevProxy.Abstractions;
 
 class ParsedSample
 {
@@ -19,13 +23,14 @@ class ParsedSample
 
 public static class ProxyUtils
 {
-    private static readonly Regex itemPathRegex = new Regex(@"(?:\/)[\w]+:[\w\/.]+(:(?=\/)|$)");
-    private static readonly Regex sanitizedItemPathRegex = new Regex("^[a-z]+:<value>$", RegexOptions.IgnoreCase);
-    private static readonly Regex entityNameRegex = new Regex("^((microsoft.graph(.[a-z]+)+)|[a-z]+)$", RegexOptions.IgnoreCase);
-    private static readonly Regex allAlphaRegex = new Regex("^[a-z]+$", RegexOptions.IgnoreCase);
-    private static readonly Regex deprecationRegex = new Regex("^[a-z]+_v2$", RegexOptions.IgnoreCase);
-    private static readonly Regex functionCallRegex = new Regex(@"^[a-z]+\(.*\)$", RegexOptions.IgnoreCase);
-    private static readonly JsonSerializerOptions jsonSerializerOptions = new JsonSerializerOptions
+    private static readonly Regex itemPathRegex = new(@"(?:\/)[\w]+:[\w\/.]+(:(?=\/)|$)");
+    private static readonly Regex sanitizedItemPathRegex = new("^[a-z]+:<value>$", RegexOptions.IgnoreCase);
+    private static readonly Regex entityNameRegex = new("^((microsoft.graph(.[a-z]+)+)|[a-z]+)$", RegexOptions.IgnoreCase);
+    // all alpha must include 2 to allow for oauth2PermissionScopes
+    private static readonly Regex allAlphaRegex = new("^[a-z2]+$", RegexOptions.IgnoreCase);
+    private static readonly Regex deprecationRegex = new("^[a-z]+_v2$", RegexOptions.IgnoreCase);
+    private static readonly Regex functionCallRegex = new(@"^[a-z]+\(.*\)$", RegexOptions.IgnoreCase);
+    private static readonly JsonSerializerOptions jsonSerializerOptions = new()
     {
         DefaultIgnoreCondition = JsonIgnoreCondition.WhenWritingNull,
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
@@ -82,7 +87,7 @@ public static class ProxyUtils
     {
         if (!IsGraphRequest(request))
         {
-            return new List<MockResponseHeader>();
+            return [];
         }
 
         var headers = new List<MockResponseHeader>
@@ -120,15 +125,15 @@ public static class ProxyUtils
         var uri = new Uri(absoluteUrl);
 
         var parsedSample = ParseSampleUrl(absoluteUrl);
-        var queryString = !String.IsNullOrEmpty(parsedSample.Search) ? $"?{SanitizeQueryParameters(parsedSample.Search)}" : "";
+        var queryString = !string.IsNullOrEmpty(parsedSample.Search) ? $"?{SanitizeQueryParameters(parsedSample.Search)}" : "";
 
         // Sanitize item path specified in query url
         var resourceUrl = parsedSample.RequestUrl;
-        if (!String.IsNullOrEmpty(resourceUrl))
+        if (!string.IsNullOrEmpty(resourceUrl))
         {
             resourceUrl = itemPathRegex.Replace(parsedSample.RequestUrl, match =>
             {
-                return $"{match.Value.Substring(0, match.Value.IndexOf(':'))}:<value>";
+                return $"{match.Value[..match.Value.IndexOf(':')]}:<value>";
             });
             // Split requestUrl into segments that can be sanitized individually
             var urlSegments = resourceUrl.Split('/');
@@ -165,12 +170,12 @@ public static class ProxyUtils
         // Check if segment is in this form: users('<some-id>|<UPN>') and transform to users(<value>)
         if (IsFunctionCall(segment))
         {
-            var openingBracketIndex = segment.IndexOf("(");
+            var openingBracketIndex = segment.IndexOf('(');
             var textWithinBrackets = segment.Substring(
                 openingBracketIndex + 1,
                 segment.Length - 2
             );
-            var sanitizedText = String.Join(',', textWithinBrackets
+            var sanitizedText = string.Join(',', textWithinBrackets
                 .Split(',')
                 .Select(text =>
                 {
@@ -183,7 +188,7 @@ public static class ProxyUtils
                     return "<value>";
                 }));
 
-            return $"{segment.Substring(0, openingBracketIndex)}({sanitizedText})";
+            return $"{segment[..openingBracketIndex]}({sanitizedText})";
         }
 
         if (IsPlaceHolderSegment(segment))
@@ -203,9 +208,9 @@ public static class ProxyUtils
     {
         // remove leading ? from query string and decode
         queryString = Uri.UnescapeDataString(
-            new Regex(@"\+").Replace(queryString.Substring(1), " ")
+            new Regex(@"\+").Replace(queryString[1..], " ")
         );
-        return String.Join('&', queryString.Split('&').Select(s => s));
+        return string.Join('&', queryString.Split('&').Select(s => s));
     }
 
     private static bool IsAllAlpha(string value) => allAlphaRegex.IsMatch(value);
@@ -338,7 +343,11 @@ public static class ProxyUtils
                     continue;
                 }
 
-                allHeaders.Remove(existingHeader);
+                // don't remove headers that we've just added
+                if (!headersToAdd.Contains(existingHeader))
+                {
+                    allHeaders.Remove(existingHeader);
+                }
             }
 
             allHeaders.Add(header);
@@ -346,4 +355,145 @@ public static class ProxyUtils
     }
 
     public static JsonSerializerOptions JsonSerializerOptions => jsonSerializerOptions;
+
+    public static bool MatchesUrlToWatch(ISet<UrlToWatch> watchedUrls, string url)
+    {
+        if (url.Contains('*'))
+        {
+            // url contains a wildcard, so convert it to regex and compare
+            var match = watchedUrls.FirstOrDefault(r => {
+                var pattern = RegexToPattern(r.Url);
+                var result = UrlRegexComparer.CompareRegexPatterns(pattern, url);
+                return result != UrlRegexComparisonResult.PatternsMutuallyExclusive;
+            });
+            return match is not null && !match.Exclude;
+        }
+        else
+        {
+            var match = watchedUrls.FirstOrDefault(r => r.Url.IsMatch(url));
+            return match is not null && !match.Exclude;
+        }
+    }
+
+    public static string PatternToRegex(string pattern)
+    {
+        return $"^{Regex.Escape(pattern).Replace("\\*", ".*")}$";
+    }
+
+    public static string RegexToPattern(Regex regex)
+    {
+        return Regex.Unescape(regex.ToString())
+            .Trim('^', '$')
+            .Replace(".*", "*");
+    }
+
+    public static List<string> GetWildcardPatterns(List<string> urls)
+    {
+        return urls
+            .GroupBy(url =>
+            {
+                if (url.Contains('*'))
+                {
+                    return url;
+                }
+
+                var uri = new Uri(url);
+                return $"{uri.Scheme}://{uri.Host}";
+            })
+            .Select(group =>
+            {
+                if (group.Count() == 1)
+                {
+                    var url = group.First();
+                    if (url.Contains('*'))
+                    {
+                        return url;
+                    }
+
+                    // For single URLs, use the URL up to the last segment
+                    var uri = new Uri(url);
+                    var path = uri.AbsolutePath;
+                    var lastSlashIndex = path.LastIndexOf('/');
+                    return $"{group.Key}{path[..lastSlashIndex]}/*";
+                }
+
+                // For multiple URLs, find the common prefix
+                var paths = group.Select(url => {
+                    if (url.Contains('*'))
+                    {
+                        return url;
+                    }
+
+                    return new Uri(url).AbsolutePath;
+                }).ToList();
+                var commonPrefix = GetCommonPrefix(paths);
+                return $"{group.Key}{commonPrefix}*";
+            })
+            .OrderBy(x => x)
+            .ToList();
+    }
+
+    private static string GetCommonPrefix(List<string> paths)
+    {
+        if (paths.Count == 0) return string.Empty;
+
+        var firstPath = paths[0];
+        var commonPrefixLength = firstPath.Length;
+
+        for (var i = 1; i < paths.Count; i++)
+        {
+            commonPrefixLength = Math.Min(commonPrefixLength, paths[i].Length);
+            for (var j = 0; j < commonPrefixLength; j++)
+            {
+                if (firstPath[j] != paths[i][j])
+                {
+                    commonPrefixLength = j;
+                    break;
+                }
+            }
+        }
+
+        // Find the last complete path segment
+        var prefix = firstPath[..commonPrefixLength];
+        var lastSlashIndex = prefix.LastIndexOf('/');
+        return lastSlashIndex >= 0 ? prefix[..(lastSlashIndex + 1)] : prefix;
+    }
+    
+    public static async Task<(bool IsValid, IEnumerable<string> ValidationErrors)> ValidateJson(string? json, string? schemaUrl, ILogger logger)
+    {
+        try
+        {
+            logger.LogDebug("Validating JSON against schema {SchemaUrl}", schemaUrl);
+
+            if (string.IsNullOrEmpty(json))
+            {
+                logger.LogDebug("JSON is empty, skipping validation");
+                return (true, []);
+            }
+            if (string.IsNullOrEmpty(schemaUrl))
+            {
+                logger.LogDebug("Schema URL is empty, skipping validation");
+                return (true, []);
+            }
+
+            logger.LogDebug("Downloading schema from {SchemaUrl}", schemaUrl);
+            using var client = new HttpClient();
+            var schemaContents = await client.GetStringAsync(schemaUrl);
+            
+            logger.LogDebug("Parsing schema");
+            var schema = JSchema.Parse(schemaContents);
+            logger.LogDebug("Parsing JSON");
+            var token = JToken.Parse(json);
+
+            logger.LogDebug("Validating JSON");
+            bool isValid = token.IsValid(schema, out IList<string> errorMessages);
+
+            return (isValid, errorMessages);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Error validating JSON");
+            return (false, [ex.Message]);
+        }
+    }
 }

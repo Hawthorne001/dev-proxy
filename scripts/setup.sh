@@ -1,8 +1,7 @@
 #!/usr/bin/env bash
-#---------------------------------------------------------------------------------------------
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License. See License in the project root for license information.
-#---------------------------------------------------------------------------------------------
+# Licensed to the .NET Foundation under one or more agreements.
+# The .NET Foundation licenses this file to you under the MIT license.
+# See the LICENSE file in the project root for more information.
 
 if [ "$(expr substr $(uname -s) 1 5)" != "Linux" ]; then
     echo "Unsupported OS. This script is for installing Dev Proxy on Linux. To install Dev Proxy on macOS or Windows use their installers. For more information, visit https://aka.ms/devproxy/start."
@@ -45,7 +44,7 @@ set -e # Terminates program immediately if any command below exits with a non-ze
 if [ $# -eq 0 ]
 then
     echo "Getting latest Dev Proxy version..."
-    version=$(curl -s https://api.github.com/repos/microsoft/dev-proxy/releases/latest | awk -F: '/"tag_name"/ {print $2}' | sed 's/[", ]//g')
+    version=$(curl -s https://api.github.com/repos/dotnet/dev-proxy/releases/latest | awk -F: '/"tag_name"/ {print $2}' | sed 's/[", ]//g')
     echo "Latest version is $version"
 else
     version=$1
@@ -53,7 +52,7 @@ fi
 
 echo "Downloading Dev Proxy $version..."
 
-base_url="https://github.com/microsoft/dev-proxy/releases/download/$version/dev-proxy"
+base_url="https://github.com/dotnet/dev-proxy/releases/download/$version/dev-proxy"
 
 ARCH="$(uname -m)"
 if [ "$(expr substr ${ARCH} 1 5)" == "arm64" ] || [ "$(expr substr ${ARCH} 1 7)" == "aarch64" ]; then

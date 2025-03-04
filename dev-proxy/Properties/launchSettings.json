@@ -41,6 +41,14 @@
     "Config": {
       "commandName": "Project",
       "commandLineArgs": "config"
+    },
+    "Jwt create": {
+      "commandName": "Project",
+      "commandLineArgs": "jwt create"
+    },
+    "Timeout": {
+      "commandName": "Project",
+      "commandLineArgs": "--timeout 30"
     }
   }
 }

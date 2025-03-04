@@ -1,30 +1,26 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-using System.Runtime.Serialization;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Abstractions;
-
-public enum LabelMode
-{
-    [EnumMember(Value = "text")]
-    Text,
-    [EnumMember(Value = "icon")]
-    Icon,
-    [EnumMember(Value = "nerdFont")]
-    NerdFont
-}
+namespace DevProxy.Abstractions;
 
 public interface IProxyConfiguration
 {
-    int Port { get; }
+    int ApiPort { get; }
+    bool AsSystemProxy { get; }
+    string ConfigFile { get; }
+    MockRequestHeader[]? FilterByHeaders { get; }
+    bool InstallCert { get; }
     string? IPAddress { get; }
-    LabelMode LabelMode { get; }
-    bool Record { get; }
     LogLevel LogLevel { get; }
+    bool NoFirstRun { get; }
+    int Port { get; }
+    bool Record { get; }
+    bool ShowTimestamps { get; }
+    long? TimeoutSeconds { get; }
+    bool ValidateSchemas { get; }
     IEnumerable<int> WatchPids { get; }
     IEnumerable<string> WatchProcessNames { get; }
-    int Rate { get; }
-    string ConfigFile { get; }
 }

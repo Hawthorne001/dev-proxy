@@ -1,19 +1,18 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Titanium.Web.Proxy.Http;
 
-namespace Microsoft.DevProxy.Plugins;
+namespace DevProxy.Plugins;
 
 internal class MessageUtils
 {
-    public static string[] BuildUseSdkForErrorsMessage(Request r) => new[] { "To handle API errors more easily, use the Microsoft Graph SDK.", $"More info at {GetMoveToSdkUrl(r)}" };
+    public static string BuildUseSdkForErrorsMessage(Request r) => 
+        $"To handle API errors more easily, use the Microsoft Graph SDK. More info at {GetMoveToSdkUrl(r)}";
 
-    public static string[] BuildUseSdkMessage(Request r) => new[] {
-        "To more easily follow best practices for working with Microsoft Graph, ",
-        "use the Microsoft Graph SDK.",
-        $"More info at {GetMoveToSdkUrl(r)}"
-    };
+    public static string BuildUseSdkMessage(Request r) =>
+        $"To more easily follow best practices for working with Microsoft Graph, use the Microsoft Graph SDK. More info at {GetMoveToSdkUrl(r)}";
 
     public static string GetMoveToSdkUrl(Request request)
     {
