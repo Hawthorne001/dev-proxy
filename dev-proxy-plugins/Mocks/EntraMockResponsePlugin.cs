@@ -1,5 +1,6 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
@@ -7,11 +8,11 @@ using System.Text.Json;
 using System.Text.Json.Serialization;
 using System.Text.RegularExpressions;
 using System.Web;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
 class IdToken
 {
@@ -32,13 +33,9 @@ class IdToken
     public string? Ver { get; set; }
 }
 
-public class EntraMockResponsePlugin : MockResponsePlugin
+public class EntraMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : MockResponsePlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     private string? lastNonce;
-
-    public EntraMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
 
     public override string Name => nameof(EntraMockResponsePlugin);
 
@@ -124,7 +121,7 @@ public class EntraMockResponsePlugin : MockResponsePlugin
         changed = true;
     }
 
-    private string PadBase64(string base64)
+    private static string PadBase64(string base64)
     {
         var padding = new string('=', (4 - base64.Length % 4) % 4);
         return base64 + padding;
@@ -153,7 +150,7 @@ public class EntraMockResponsePlugin : MockResponsePlugin
     {
         if (Context.Certificate is null)
         {
-            return new List<string>();
+            return [];
         }
 
         var collection = new X509Certificate2Collection

@@ -1,40 +1,24 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Logging;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using System.Text.Json;
 
-namespace Microsoft.DevProxy.Plugins.Behavior;
+namespace DevProxy.Plugins.Behavior;
 
-internal class RateLimitingCustomResponseLoader : IDisposable
+internal class RateLimitingCustomResponseLoader(ILogger logger, RateLimitConfiguration configuration, bool validateSchemas) : BaseLoader(logger, validateSchemas)
 {
-    private readonly ILogger _logger;
-    private readonly RateLimitConfiguration _configuration;
+    private readonly ILogger _logger = logger ?? throw new ArgumentNullException(nameof(logger));
+    private readonly RateLimitConfiguration _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
+    protected override string FilePath => Path.Combine(Directory.GetCurrentDirectory(), _configuration.CustomResponseFile);
 
-    public RateLimitingCustomResponseLoader(ILogger logger, RateLimitConfiguration configuration)
+    protected override void LoadData(string fileContents)
     {
-        _logger = logger ?? throw new ArgumentNullException(nameof(logger));
-        _configuration = configuration ?? throw new ArgumentNullException(nameof(configuration));
-    }
-
-    private string _customResponseFilePath => Path.Combine(Directory.GetCurrentDirectory(), _configuration.CustomResponseFile);
-    private FileSystemWatcher? _watcher;
-
-    public void LoadResponse()
-    {
-        if (!File.Exists(_customResponseFilePath))
-        {
-            _logger.LogWarning("File {configurationFile} not found. No response will be provided", _configuration.CustomResponseFile);
-            return;
-        }
-
         try
         {
-            using var stream = new FileStream(_customResponseFilePath, FileMode.Open, FileAccess.Read, FileShare.ReadWrite);
-            using var reader = new StreamReader(stream);
-            var responseString = reader.ReadToEnd();
-            var response = JsonSerializer.Deserialize<MockResponseResponse>(responseString, ProxyUtils.JsonSerializerOptions);
+            var response = JsonSerializer.Deserialize<MockResponseResponse>(fileContents, ProxyUtils.JsonSerializerOptions);
             if (response is not null)
             {
                 _configuration.CustomResponse = response;
@@ -44,46 +28,5 @@ internal class RateLimitingCustomResponseLoader : IDisposable
         {
             _logger.LogError(ex, "An error has occurred while reading {configurationFile}:", _configuration.CustomResponseFile);
         }
-    }
-
-    public void InitResponsesWatcher()
-    {
-        if (_watcher is not null)
-        {
-            return;
-        }
-
-        string path = Path.GetDirectoryName(_customResponseFilePath) ?? throw new InvalidOperationException($"{_customResponseFilePath} is an invalid path");
-        if (!File.Exists(_customResponseFilePath))
-        {
-            _logger.LogWarning("File {configurationFile} not found. No mocks will be provided", _configuration.CustomResponseFile);
-            return;
-        }
-
-        _watcher = new FileSystemWatcher(Path.GetFullPath(path))
-        {
-            NotifyFilter = NotifyFilters.CreationTime
-                             | NotifyFilters.FileName
-                             | NotifyFilters.LastWrite
-                             | NotifyFilters.Size,
-            Filter = Path.GetFileName(_customResponseFilePath)
-        };
-        _watcher.Changed += ResponseFile_Changed;
-        _watcher.Created += ResponseFile_Changed;
-        _watcher.Deleted += ResponseFile_Changed;
-        _watcher.Renamed += ResponseFile_Changed;
-        _watcher.EnableRaisingEvents = true;
-
-        LoadResponse();
-    }
-
-    private void ResponseFile_Changed(object sender, FileSystemEventArgs e)
-    {
-        LoadResponse();
-    }
-
-    public void Dispose()
-    {
-        _watcher?.Dispose();
     }
 }

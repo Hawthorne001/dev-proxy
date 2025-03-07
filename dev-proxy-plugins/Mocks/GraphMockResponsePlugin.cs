@@ -1,29 +1,27 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Net;
 using System.Text.Json;
 using System.Text.RegularExpressions;
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.DevProxy.Plugins.Behavior;
+using DevProxy.Abstractions;
+using DevProxy.Plugins.Behavior;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Titanium.Web.Proxy.Models;
 
-namespace Microsoft.DevProxy.Plugins.Mocks;
+namespace DevProxy.Plugins.Mocks;
 
-public class GraphMockResponsePlugin : MockResponsePlugin
+public class GraphMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : MockResponsePlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
-    public GraphMockResponsePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(GraphMockResponsePlugin);
 
-    protected override async Task OnRequest(object? sender, ProxyRequestArgs e)
+    protected override async Task OnRequestAsync(object? sender, ProxyRequestArgs e)
     {
         if (_configuration.NoMocks)
         {
+            Logger.LogRequest("Mocks are disabled", MessageType.Skipped, new LoggingContext(e.Session));
             // mocking has been disabled. Nothing to do
             return;
         }
@@ -31,14 +29,14 @@ public class GraphMockResponsePlugin : MockResponsePlugin
         if (!ProxyUtils.IsGraphBatchUrl(e.Session.HttpClient.Request.RequestUri))
         {
             // not a batch request, use the basic mock functionality
-            await base.OnRequest(sender, e);
+            await base.OnRequestAsync(sender, e);
             return;
         }
 
         var batch = JsonSerializer.Deserialize<GraphBatchRequestPayload>(e.Session.HttpClient.Request.BodyString, ProxyUtils.JsonSerializerOptions);
         if (batch == null)
         {
-            await base.OnRequest(sender, e);
+            await base.OnRequestAsync(sender, e);
             return;
         }
 
@@ -75,7 +73,7 @@ public class GraphMockResponsePlugin : MockResponsePlugin
                     }
                 };
 
-                Logger.LogRequest([$"502 {request.Url}"], MessageType.Mocked, new LoggingContext(e.Session));
+                Logger.LogRequest($"502 {request.Url}", MessageType.Mocked, new LoggingContext(e.Session));
             }
             else
             {
@@ -133,7 +131,7 @@ public class GraphMockResponsePlugin : MockResponsePlugin
                     Body = body
                 };
 
-                Logger.LogRequest([$"{mockResponse.Response?.StatusCode ?? 200} {mockResponse.Request?.Url}"], MessageType.Mocked, new LoggingContext(e.Session));
+                Logger.LogRequest($"{mockResponse.Response?.StatusCode ?? 200} {mockResponse.Request?.Url}", MessageType.Mocked, new LoggingContext(e.Session));
             }
 
             responses.Add(response);
@@ -144,12 +142,12 @@ public class GraphMockResponsePlugin : MockResponsePlugin
         var batchHeaders = ProxyUtils.BuildGraphResponseHeaders(e.Session.HttpClient.Request, batchRequestId, batchRequestDate);
         var batchResponse = new GraphBatchResponsePayload
         {
-            Responses = responses.ToArray()
+            Responses = [.. responses]
         };
         var batchResponseString = JsonSerializer.Serialize(batchResponse, ProxyUtils.JsonSerializerOptions);
         ProcessMockResponse(ref batchResponseString, batchHeaders, e, null);
         e.Session.GenericResponse(batchResponseString ?? string.Empty, HttpStatusCode.OK, batchHeaders.Select(h => new HttpHeader(h.Name, h.Value)));
-        Logger.LogRequest([$"200 {e.Session.HttpClient.Request.RequestUri}"], MessageType.Mocked, new LoggingContext(e.Session));
+        Logger.LogRequest($"200 {e.Session.HttpClient.Request.RequestUri}", MessageType.Mocked, new LoggingContext(e.Session));
         e.ResponseState.HasBeenSet = true;
     }
 

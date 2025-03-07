@@ -1,9 +1,10 @@
-﻿// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
-using Titanium.Web.Proxy.EventArguments;
-using Microsoft.Extensions.Logging;
+﻿// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
-namespace Microsoft.DevProxy.Abstractions;
+using Titanium.Web.Proxy.EventArguments;
+
+namespace DevProxy.Abstractions;
 
 public enum MessageType
 {
@@ -16,22 +17,13 @@ public enum MessageType
     Chaos,
     Mocked,
     InterceptedResponse,
-    FinishedProcessingRequest
+    FinishedProcessingRequest,
+    Skipped,
+    Processed,
+    Timestamp
 }
 
-public class LoggingContext
+public class LoggingContext(SessionEventArgs session)
 {
-    public SessionEventArgs Session { get; }
-
-    public LoggingContext(SessionEventArgs session)
-    {
-        Session = session;
-    }
-}
-
-public interface IProxyLogger : ICloneable, ILogger
-{
-    public LogLevel LogLevel { get; set; }
-    public void LogRequest(string[] message, MessageType messageType, LoggingContext? context = null);
-    public void LogRequest(string[] message, MessageType messageType, string method, string url);
+    public SessionEventArgs Session { get; } = session;
 }

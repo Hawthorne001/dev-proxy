@@ -1,12 +1,13 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Configuration;
-using Microsoft.DevProxy.Abstractions;
+using DevProxy.Abstractions;
 using System.Text.Json;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.Guidance;
+namespace DevProxy.Plugins.Guidance;
 
 class ExternalConnectionSchema
 {
@@ -26,27 +27,28 @@ class ExternalConnectionSchemaProperty
     public string? Type { get; set; }
 }
 
-public class GraphConnectorGuidancePlugin : BaseProxyPlugin
+public class GraphConnectorGuidancePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseProxyPlugin(pluginEvents, context, logger, urlsToWatch, configSection)
 {
-    public GraphConnectorGuidancePlugin(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
-
     public override string Name => nameof(GraphConnectorGuidancePlugin);
 
-    public override void Register()
+    public override async Task RegisterAsync()
     {
-        base.Register();
+        await base.RegisterAsync();
 
-        PluginEvents.BeforeRequest += BeforeRequest;
+        PluginEvents.BeforeRequest += BeforeRequestAsync;
     }
 
-    private Task BeforeRequest(object sender, ProxyRequestArgs e)
+    private Task BeforeRequestAsync(object sender, ProxyRequestArgs e)
     {
         if (UrlsToWatch is null ||
-          !e.HasRequestUrlMatch(UrlsToWatch) ||
-          !String.Equals(e.Session.HttpClient.Request.Method, "PATCH", StringComparison.OrdinalIgnoreCase))
+            !e.HasRequestUrlMatch(UrlsToWatch))
         {
+            Logger.LogRequest("URL not matched", MessageType.Skipped, new LoggingContext(e.Session));
+            return Task.CompletedTask;
+        }
+        if (!string.Equals(e.Session.HttpClient.Request.Method, "PATCH", StringComparison.OrdinalIgnoreCase))
+        {
+            Logger.LogRequest("Skipping non-PATCH request", MessageType.Skipped, new LoggingContext(e.Session));
             return Task.CompletedTask;
         }
 
@@ -55,14 +57,14 @@ public class GraphConnectorGuidancePlugin : BaseProxyPlugin
             var schemaString = e.Session.HttpClient.Request.BodyString;
             if (string.IsNullOrEmpty(schemaString))
             {
-                Logger.LogRequest([ "No schema found in the request body." ], MessageType.Failed, new LoggingContext(e.Session));
+                Logger.LogRequest("No schema found in the request body.", MessageType.Failed, new LoggingContext(e.Session));
                 return Task.CompletedTask;
             }
 
             var schema = JsonSerializer.Deserialize<ExternalConnectionSchema>(schemaString, ProxyUtils.JsonSerializerOptions);
             if (schema is null || schema.Properties is null)
             {
-                Logger.LogRequest([ "Invalid schema found in the request body." ], MessageType.Failed, new LoggingContext(e.Session));
+                Logger.LogRequest("Invalid schema found in the request body.", MessageType.Failed, new LoggingContext(e.Session));
                 return Task.CompletedTask;
             }
 
@@ -97,13 +99,13 @@ public class GraphConnectorGuidancePlugin : BaseProxyPlugin
                 ];
 
                 Logger.LogRequest(
-                    [
-                        $"The schema is missing the following semantic labels: {string.Join(", ", missingLabels.Where(s => s != ""))}.",
-                        "Ingested content might not show up in Microsoft Copilot for Microsoft 365.",
-                        "More information: https://aka.ms/devproxy/guidance/gc/ux"
-                    ],
+                    $"The schema is missing the following semantic labels: {string.Join(", ", missingLabels.Where(s => s != ""))}. Ingested content might not show up in Microsoft Copilot for Microsoft 365. More information: https://aka.ms/devproxy/guidance/gc/ux",
                     MessageType.Failed, new LoggingContext(e.Session)
                 );
+            }
+            else
+            {
+                Logger.LogRequest("The schema contains all the required semantic labels.", MessageType.Skipped, new LoggingContext(e.Session));
             }
         }
         catch (Exception ex)

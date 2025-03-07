@@ -1,15 +1,16 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Text;
-using Microsoft.DevProxy.Abstractions;
-using Microsoft.DevProxy.Plugins.RequestLogs;
+using DevProxy.Abstractions;
+using DevProxy.Plugins.RequestLogs;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins.Reporters;
+namespace DevProxy.Plugins.Reporters;
 
-public class MarkdownReporter : BaseReporter
+public class MarkdownReporter(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : BaseReporter(pluginEvents, context, logger, urlsToWatch, configSection)
 {
     public override string Name => nameof(MarkdownReporter);
     public override string FileExtension => ".md";
@@ -22,17 +23,14 @@ public class MarkdownReporter : BaseReporter
         { typeof(ExecutionSummaryPluginReportByUrl), TransformExecutionSummaryByUrl },
         { typeof(ExecutionSummaryPluginReportByMessageType), TransformExecutionSummaryByMessageType },
         { typeof(HttpFileGeneratorPlugin), TransformHttpFileGeneratorReport },
-        { typeof(MinimalPermissionsGuidancePluginReport), TransformMinimalPermissionsGuidanceReport },
-        { typeof(MinimalPermissionsPluginReport), TransformMinimalPermissionsReport },
-        { typeof(OpenApiSpecGeneratorPluginReport), TransformOpenApiSpecGeneratorReport }
+        { typeof(GraphMinimalPermissionsGuidancePluginReport), TransformMinimalPermissionsGuidanceReport },
+        { typeof(GraphMinimalPermissionsPluginReport), TransformMinimalPermissionsReport },
+        { typeof(OpenApiSpecGeneratorPluginReport), TransformOpenApiSpecGeneratorReport },
+        { typeof(UrlDiscoveryPluginReport), TransformUrlDiscoveryReport }
     };
 
     private const string _requestsInterceptedMessage = "Requests intercepted";
     private const string _requestsPassedThroughMessage = "Requests passed through";
-
-    public MarkdownReporter(IPluginEvents pluginEvents, IProxyContext context, ILogger logger, ISet<UrlToWatch> urlsToWatch, IConfigurationSection? configSection = null) : base(pluginEvents, context, logger, urlsToWatch, configSection)
-    {
-    }
 
     protected override string? GetReport(KeyValuePair<string, object> report)
     {
@@ -57,8 +55,8 @@ public class MarkdownReporter : BaseReporter
     {
         var apiCenterOnboardingReport = (ApiCenterOnboardingPluginReport)report;
 
-        if (!apiCenterOnboardingReport.NewApis.Any() &&
-            !apiCenterOnboardingReport.ExistingApis.Any())
+        if (apiCenterOnboardingReport.NewApis.Length == 0 &&
+            apiCenterOnboardingReport.ExistingApis.Length == 0)
         {
             return null;
         }
@@ -68,7 +66,7 @@ public class MarkdownReporter : BaseReporter
         sb.AppendLine("# Azure API Center onboarding report");
         sb.AppendLine();
 
-        if (apiCenterOnboardingReport.NewApis.Any())
+        if (apiCenterOnboardingReport.NewApis.Length != 0)
         {
             var apisPerSchemeAndHost = apiCenterOnboardingReport.NewApis.GroupBy(x =>
             {
@@ -90,7 +88,7 @@ public class MarkdownReporter : BaseReporter
             sb.AppendLine();
         }
 
-        if (apiCenterOnboardingReport.ExistingApis.Any())
+        if (apiCenterOnboardingReport.ExistingApis.Length != 0)
         {
             sb.AppendLine("## ✅ APIs that are already registered in Azure API Center");
             sb.AppendLine();
@@ -128,7 +126,7 @@ public class MarkdownReporter : BaseReporter
         sb.AppendLine("## 🔌 APIs")
             .AppendLine();
 
-        if (apiCenterMinimalPermissionsReport.Results.Any())
+        if (apiCenterMinimalPermissionsReport.Results.Length != 0)
         {
             foreach (var apiResult in apiCenterMinimalPermissionsReport.Results)
             {
@@ -157,7 +155,7 @@ public class MarkdownReporter : BaseReporter
         sb.AppendLine("## ⚠️ Unmatched requests")
             .AppendLine();
 
-        if (apiCenterMinimalPermissionsReport.UnmatchedRequests.Any())
+        if (apiCenterMinimalPermissionsReport.UnmatchedRequests.Length != 0)
         {
             sb.AppendLine("The following requests were not matched to any API in API Center:")
                 .AppendLine()
@@ -174,7 +172,7 @@ public class MarkdownReporter : BaseReporter
         sb.AppendLine("## 🛑 Errors")
             .AppendLine();
 
-        if (apiCenterMinimalPermissionsReport.Errors.Any())
+        if (apiCenterMinimalPermissionsReport.Errors.Length != 0)
         {
             sb.AppendLine("The following errors occurred while determining minimal permissions:")
                 .AppendLine()
@@ -193,7 +191,7 @@ public class MarkdownReporter : BaseReporter
 
     private static string? TransformApiCenterProductionVersionReport(object report)
     {
-        var getReadableApiStatus = (ApiCenterProductionVersionPluginReportItemStatus status) => status switch
+        static string getReadableApiStatus(ApiCenterProductionVersionPluginReportItemStatus status) => status switch
         {
             ApiCenterProductionVersionPluginReportItemStatus.NotRegistered => "🛑 Not registered",
             ApiCenterProductionVersionPluginReportItemStatus.NonProduction => "⚠️ Non-production",
@@ -337,7 +335,7 @@ public class MarkdownReporter : BaseReporter
 
     private static void AddExecutionSummaryReportSummary(IEnumerable<RequestLog> requestLogs, StringBuilder sb)
     {
-        var getReadableMessageTypeForSummary = (MessageType messageType) => messageType switch
+        static string getReadableMessageTypeForSummary(MessageType messageType) => messageType switch
         {
             MessageType.Chaos => "Requests with chaos",
             MessageType.Failed => "Failures",
@@ -370,13 +368,13 @@ public class MarkdownReporter : BaseReporter
 
     private static string? TransformMinimalPermissionsGuidanceReport(object report)
     {
-        var minimalPermissionsGuidanceReport = (MinimalPermissionsGuidancePluginReport)report;
+        var minimalPermissionsGuidanceReport = (GraphMinimalPermissionsGuidancePluginReport)report;
 
         var sb = new StringBuilder();
         sb.AppendLine("# Minimal permissions report");
         sb.AppendLine();
 
-        var transformPermissionsInfo = (Action<MinimalPermissionsInfo, string>)((permissionsInfo, type) =>
+        void transformPermissionsInfo(GraphMinimalPermissionsInfo permissionsInfo, string type)
         {
             sb.AppendLine($"## Minimal {type} permissions");
             sb.AppendLine();
@@ -412,7 +410,7 @@ public class MarkdownReporter : BaseReporter
             }
 
             sb.AppendLine();
-        });
+        }
 
         if (minimalPermissionsGuidanceReport.DelegatedPermissions is not null)
         {
@@ -437,7 +435,7 @@ public class MarkdownReporter : BaseReporter
 
     private static string? TransformMinimalPermissionsReport(object report)
     {
-        var minimalPermissionsReport = (MinimalPermissionsPluginReport)report;
+        var minimalPermissionsReport = (GraphMinimalPermissionsPluginReport)report;
 
         var sb = new StringBuilder();
         sb.AppendLine($"# Minimal {minimalPermissionsReport.PermissionsType.ToString().ToLower()} permissions report");
@@ -484,6 +482,43 @@ public class MarkdownReporter : BaseReporter
         sb.AppendLine();
         sb.AppendLine();
 
+        return sb.ToString();
+    }
+
+    private static string? TransformUrlDiscoveryReport(object report)
+    {
+        var urlDiscoveryPluginReport = (UrlDiscoveryPluginReport)report;
+
+        var sb = new StringBuilder();
+        sb.AppendLine("## Wildcards");
+        sb.AppendLine("");
+        sb.AppendLine("You can use wildcards to catch multiple URLs with the same pattern.");
+        sb.AppendLine("For example, you can use the following URL pattern to catch all API requests to");
+        sb.AppendLine("JSON Placeholder API:");
+        sb.AppendLine("");
+        sb.AppendLine("```text");
+        sb.AppendLine("https://jsonplaceholder.typicode.com/*");
+        sb.AppendLine("```");
+        sb.AppendLine("");
+        sb.AppendLine("## Excluding URLs");
+        sb.AppendLine("");
+        sb.AppendLine("You can exclude URLs with ! to prevent them from being intercepted.");
+        sb.AppendLine("For example, you can exclude the URL `https://jsonplaceholder.typicode.com/authors`");
+        sb.AppendLine("by using the following URL pattern:");
+        sb.AppendLine("");
+        sb.AppendLine("```text");
+        sb.AppendLine("!https://jsonplaceholder.typicode.com/authors");
+        sb.AppendLine("https://jsonplaceholder.typicode.com/*");
+        sb.AppendLine("```");
+        sb.AppendLine("");
+        sb.AppendLine("Intercepted URLs:");
+        sb.AppendLine();
+        sb.AppendLine("```text");
+
+        sb.AppendJoin(Environment.NewLine, urlDiscoveryPluginReport.Data);
+
+        sb.AppendLine("");
+        sb.AppendLine("```");
         return sb.ToString();
     }
 

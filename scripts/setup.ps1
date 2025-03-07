@@ -1,7 +1,6 @@
-#---------------------------------------------------------------------------------------------
-# Copyright (c) Microsoft Corporation. All rights reserved.
-# Licensed under the MIT License. See License in the project root for license information.
-#---------------------------------------------------------------------------------------------
+# Licensed to the .NET Foundation under one or more agreements.
+# The .NET Foundation licenses this file to you under the MIT license.
+# See the LICENSE file in the project root for more information.
 
 if (-not $IsLinux)
 {
@@ -37,7 +36,7 @@ $full_path = Resolve-Path .
 if (-not $env:DEV_PROXY_VERSION) {
     # Get the latest Dev Proxy version
     Write-Host "Getting latest Dev Proxy version..."
-    $response = Invoke-RestMethod -Uri "https://api.github.com/repos/microsoft/dev-proxy/releases/latest" -ErrorAction Stop
+    $response = Invoke-RestMethod -Uri "https://api.github.com/repos/dotnet/dev-proxy/releases/latest" -ErrorAction Stop
     $version = $response.tag_name
     Write-Host "Latest version is $version"
 } else {
@@ -46,7 +45,7 @@ if (-not $env:DEV_PROXY_VERSION) {
 
 # Download Dev Proxy
 Write-Host "Downloading Dev Proxy $version..."
-$base_url = "https://github.com/microsoft/dev-proxy/releases/download/$version/dev-proxy"
+$base_url = "https://github.com/dotnet/dev-proxy/releases/download/$version/dev-proxy"
 
 if ($arch -eq "X64") {
     $url = "$base_url-linux-x64-$version.zip"

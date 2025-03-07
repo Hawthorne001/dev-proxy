@@ -1,9 +1,10 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using Microsoft.Extensions.Logging;
 
-namespace Microsoft.DevProxy.Plugins;
+namespace DevProxy.Plugins;
 
 internal class TracingDelegatingHandler(ILogger logger) : DelegatingHandler
 {
@@ -20,7 +21,7 @@ internal class TracingDelegatingHandler(ILogger logger) : DelegatingHandler
         }
         if (request.Content is not null)
         {
-            var body = await request.Content.ReadAsStringAsync();
+            var body = await request.Content.ReadAsStringAsync(cancellationToken);
             _logger.LogTrace("Body: {body}", body);
         }
 
@@ -33,7 +34,7 @@ internal class TracingDelegatingHandler(ILogger logger) : DelegatingHandler
         }
         if (response.Content is not null)
         {
-            var body = await response.Content.ReadAsStringAsync();
+            var body = await response.Content.ReadAsStringAsync(cancellationToken);
             _logger.LogTrace("Body: {body}", body);
         }
 

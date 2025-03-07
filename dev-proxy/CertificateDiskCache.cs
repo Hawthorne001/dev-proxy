@@ -1,11 +1,12 @@
-// Copyright (c) Microsoft Corporation.
-// Licensed under the MIT License.
+// Licensed to the .NET Foundation under one or more agreements.
+// The .NET Foundation licenses this file to you under the MIT license.
+// See the LICENSE file in the project root for more information.
 
 using System.Security.Cryptography.X509Certificates;
 using Titanium.Web.Proxy.Certificates.Cache;
 using Titanium.Web.Proxy.Helpers;
 
-namespace Microsoft.DevProxy;
+namespace DevProxy;
 
 // based on https://github.com/justcoding121/titanium-web-proxy/blob/9e71608d204e5b67085656dd6b355813929801e4/src/Titanium.Web.Proxy/Certificates/Cache/DefaultCertificateDiskCache.cs
 public sealed class CertificateDiskCache : ICertificateCache
@@ -58,7 +59,7 @@ public sealed class CertificateDiskCache : ICertificateCache
         }
     }
 
-    private X509Certificate2? LoadCertificate(string path, string password, X509KeyStorageFlags storageFlags)
+    private static X509Certificate2? LoadCertificate(string path, string password, X509KeyStorageFlags storageFlags)
     {
         byte[] exported;
 
@@ -74,7 +75,7 @@ public sealed class CertificateDiskCache : ICertificateCache
             return null;
         }
 
-        return new X509Certificate2(exported, password, storageFlags);
+        return X509CertificateLoader.LoadPkcs12(exported, password, storageFlags);
     }
 
     private string GetRootCertificatePath(string pathOrName, bool create)
